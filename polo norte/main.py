@@ -23,7 +23,7 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
 
 ITEMS_ACTIVO = False
 FICHAJE_ACTIVO = False
-TASER_DM_ACTIVO = True
+TASER_DM_ACTIVO = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("Main")
@@ -36,7 +36,7 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 
 @bot.event
 async def on_ready():
-    global FICHAJE_ACTIVO
+    global ITEMS_ACTIVO, FICHAJE_ACTIVO, TASER_DM_ACTIVO
     if not all([TOKEN, DATABASE_URL, LOGS_CHANNEL_ID, ALERT_CHANNEL_ID]):
         logger.error("Faltan variables de entorno.")
         return
@@ -51,6 +51,17 @@ async def on_ready():
         logger.critical("Error inicializando DB: %s", e)
         await log_actions.log_error("❌ Error DB", f"No se pudo inicializar la base de datos:\n`{e}`")
         return
+
+    # ── Cargar toggles desde DB ──
+    try:
+        ITEMS_ACTIVO = db.get_toggle("items")
+        FICHAJE_ACTIVO = db.get_toggle("fichaje")
+        TASER_DM_ACTIVO = db.get_toggle("taser_dm")
+        fichaje.set_taser_dm_enabled(TASER_DM_ACTIVO)
+        logger.info("Toggles cargados: items=%s fichaje=%s taser_dm=%s", ITEMS_ACTIVO, FICHAJE_ACTIVO, TASER_DM_ACTIVO)
+    except Exception as e:
+        logger.warning("Error cargando toggles, usando defaults: %s", e)
+        await log_actions.log_warning("⚠️ Toggles defaults", f"No se pudieron cargar desde DB:\n`{e}`")
 
     try:
         pendientes = db.get_pending_alerts()
@@ -196,11 +207,13 @@ async def items_toggle(interaction: discord.Interaction, estado: str = None):
 
     if estado.lower() in ("on", "1", "true", "si"):
         ITEMS_ACTIVO = True
+        db.set_toggle("items", True)
         logger.info("Items ilegales activado por %s", interaction.user)
         log_actions.log_info("🟢 Items ACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🟢 **Constancia de items ilegales ACTIVADA**\nSe dejará constancia de items ilegales en stash.", ephemeral=True)
     elif estado.lower() in ("off", "0", "false", "no"):
         ITEMS_ACTIVO = False
+        db.set_toggle("items", False)
         logger.info("Items ilegales desactivado por %s", interaction.user)
         log_actions.log_info("🔴 Items DESACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🔴 **Constancia de items ilegales DESACTIVADA**", ephemeral=True)
@@ -227,11 +240,13 @@ async def fichaje_toggle(interaction: discord.Interaction, estado: str = None):
 
     if estado.lower() in ("on", "1", "true", "si"):
         FICHAJE_ACTIVO = True
+        db.set_toggle("fichaje", True)
         logger.info("Fichaje tracking activado por %s", interaction.user)
         log_actions.log_info("🟢 Fichaje ACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🟢 **Fichaje tracking ACTIVADO**\nSe están monitoreando los fichajes y el retorno de táseres.", ephemeral=True)
     elif estado.lower() in ("off", "0", "false", "no"):
         FICHAJE_ACTIVO = False
+        db.set_toggle("fichaje", False)
         logger.info("Fichaje tracking desactivado por %s", interaction.user)
         log_actions.log_info("🔴 Fichaje DESACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🔴 **Fichaje tracking DESACTIVADO**", ephemeral=True)
@@ -255,17 +270,35 @@ async def taser_dm_toggle(interaction: discord.Interaction, estado: str = None):
     if estado.lower() in ("on", "1", "true", "si"):
         TASER_DM_ACTIVO = True
         fichaje.set_taser_dm_enabled(True)
+        db.set_toggle("taser_dm", True)
         logger.info("DM de táser activado por %s", interaction.user)
         log_actions.log_info("🟢 Taser-DM ACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🟢 **DM de táser ACTIVADO**\nSe enviará DM a quienes no devuelvan el táser.", ephemeral=True)
     elif estado.lower() in ("off", "0", "false", "no"):
         TASER_DM_ACTIVO = False
         fichaje.set_taser_dm_enabled(False)
+        db.set_toggle("taser_dm", False)
         logger.info("DM de táser desactivado por %s", interaction.user)
         log_actions.log_info("🔴 Taser-DM DESACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🔴 **DM de táser DESACTIVADO**\nNo se enviarán mensajes directos.", ephemeral=True)
     else:
         await interaction.response.send_message("❌ Usá `/taser-dm on` o `/taser-dm off`", ephemeral=True)
+
+
+@bot.tree.command(name="estado", description="Muestra el estado actual de items, fichaje y DM de táser")
+async def estado(interaction: discord.Interaction):
+    items_icon = "🟢" if ITEMS_ACTIVO else "🔴"
+    fichaje_icon = "🟢" if FICHAJE_ACTIVO else "🔴"
+    taser_icon = "🟢" if TASER_DM_ACTIVO else "🔴"
+    embed = discord.Embed(
+        title="📊 Estado del Bot",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name=f"{items_icon} Items ilegales", value="ACTIVO" if ITEMS_ACTIVO else "INACTIVO", inline=True)
+    embed.add_field(name=f"{fichaje_icon} Fichaje + táser", value="ACTIVO" if FICHAJE_ACTIVO else "INACTIVO", inline=True)
+    embed.add_field(name=f"{taser_icon} DM táser", value="ACTIVO" if TASER_DM_ACTIVO else "INACTIVO", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.event

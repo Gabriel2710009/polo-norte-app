@@ -67,6 +67,46 @@ def init():
     conn.close()
     logger.info("Tabla fichaje_registros lista.")
 
+    init_toggles()
+
+
+def init_toggles():
+    conn = _try(get_conn)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS toggle_estados (
+            nombre TEXT PRIMARY KEY,
+            activo BOOLEAN NOT NULL DEFAULT FALSE
+        )
+    """)
+    cur.execute("INSERT INTO toggle_estados (nombre, activo) VALUES ('items', FALSE) ON CONFLICT (nombre) DO NOTHING")
+    cur.execute("INSERT INTO toggle_estados (nombre, activo) VALUES ('fichaje', FALSE) ON CONFLICT (nombre) DO NOTHING")
+    cur.execute("INSERT INTO toggle_estados (nombre, activo) VALUES ('taser_dm', TRUE) ON CONFLICT (nombre) DO NOTHING")
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("Tabla toggle_estados lista.")
+
+
+def get_toggle(nombre: str) -> bool:
+    conn = _try(get_conn)
+    cur = conn.cursor()
+    cur.execute("SELECT activo FROM toggle_estados WHERE nombre = %s", (nombre,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else False
+
+
+def set_toggle(nombre: str, activo: bool):
+    conn = _try(get_conn)
+    cur = conn.cursor()
+    cur.execute("UPDATE toggle_estados SET activo = %s WHERE nombre = %s", (activo, nombre))
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.debug("Toggle %s = %s", nombre, activo)
+
 
 def insert_clock_in(user_id: str, username: str) -> int:
     conn = _try(get_conn)
