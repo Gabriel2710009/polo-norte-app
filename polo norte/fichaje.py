@@ -16,6 +16,20 @@ TASER_DM_ENABLED = True
 
 logger = logging.getLogger("Fichaje")
 
+_pending_checks: dict[str, asyncio.Event] = {}
+_player_names: dict[str, str] = {}
+
+
+def _get_name(user_id: str) -> str:
+    name = _player_names.get(user_id)
+    if name:
+        return name
+    name = db.get_username(user_id)
+    if name:
+        _player_names[user_id] = name
+        return name
+    return f"<@{user_id}>"
+
 
 def parse_fichaje_embed(embed) -> dict | None:
     title = (embed.title or "").strip()
@@ -76,9 +90,13 @@ async def handle_clock_in(bot, embed, logs_channel_id: int):
         if not data:
             return
 
+        if data["username"]:
+            _player_names[data["user_id"]] = data["username"]
+
         record_id = db.insert_clock_in(data["user_id"], data["username"])
+        nombre = _get_name(data["user_id"])
         logger.info("Clock-in registrado: %s (id=%s)", data["user_id"], record_id)
-        log_actions.log_info("🟢 Clock-in registrado", f"<@{data['user_id']}> inició turno (ID {record_id}).")
+        log_actions.log_info("🟢 Clock-in registrado", f"{nombre} (<@{data['user_id']}>) inició turno (ID {record_id}).")
 
         taser = await check_taser_retirado_al_inicio(bot, data["user_id"], logs_channel_id)
         if taser:
@@ -86,7 +104,7 @@ async def handle_clock_in(bot, embed, logs_channel_id: int):
             logger.info("Taser retirado marcado para %s (record=%s)", data["user_id"], record_id)
             log_actions.log_warning(
                 "🔫 Táser retirado detectado",
-                f"<@{data['user_id']}> retiró un táser antes de su turno. Se controlará su devolución al cierre."
+                f"{nombre} (<@{data['user_id']}>) retiró un táser antes de su turno. Se controlará su devolución al cierre."
             )
     except Exception as e:
         logger.error("Error en handle_clock_in: %s", e)
@@ -105,19 +123,29 @@ async def handle_clock_out(bot, embed, logs_channel_id: int, alert_channel_id: i
             log_actions.log_warning("⚠️ Clock-out sin registro", f"<@{data['user_id']}> cerró turno pero no se encontró un inicio activo.")
             return
 
+        nombre = _get_name(data["user_id"])
         logger.info("Clock-out registrado: %s (record=%s)", data["user_id"], record_id)
-        log_actions.log_info("🔴 Clock-out registrado", f"<@{data['user_id']}> cerró turno (ID {record_id}).")
+        log_actions.log_info("🔴 Clock-out registrado", f"{nombre} (<@{data['user_id']}>) cerró turno (ID {record_id}).")
 
+        evt = asyncio.Event()
+        _pending_checks[data["user_id"]] = evt
         asyncio.create_task(
-            _esperar_y_verificar(bot, data["user_id"], record_id, alert_channel_id, taser_dm_activo)
+            _esperar_y_verificar(bot, data["user_id"], record_id, alert_channel_id, taser_dm_activo, evt)
         )
     except Exception as e:
         logger.error("Error en handle_clock_out: %s", e)
         await log_actions.log_error("❌ Error clock-out", f"`{e}`")
 
 
-async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_dm_activo: bool = True):
-    await asyncio.sleep(CHECK_WINDOW_MINUTES * 60)
+async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_dm_activo: bool = True, evt: asyncio.Event = None):
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=CHECK_WINDOW_MINUTES * 60)
+        logger.info("Taser devuelto durante la espera para %s (record=%s)", user_id, record_id)
+        return
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        _pending_checks.pop(user_id, None)
 
     try:
         conn = db.get_conn()
@@ -128,7 +156,7 @@ async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_
         )
         row = cur.fetchone()
         cur.close()
-        conn.close()
+        db.close_conn(conn)
 
         if not row:
             logger.warning("Record %s no encontrado en verificación", record_id)
@@ -143,11 +171,13 @@ async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_
             logger.info("Record %s: alerta ya enviada.", record_id)
             return
 
+        nombre = row[3] or f"<@{user_id}>"
+
         db.mark_alerta_enviada(record_id)
         logger.warning("Táser NO devuelto para %s (record=%s)", user_id, record_id)
         log_actions.log_warning(
             "⚠️ Táser NO devuelto",
-            f"<@{user_id}> no devolvió el táser tras {CHECK_WINDOW_MINUTES} min del clock-out."
+            f"{nombre} (<@{user_id}>) no devolvió el táser tras {CHECK_WINDOW_MINUTES} min del clock-out."
         )
 
         channel = bot.get_channel(alert_channel_id)
@@ -157,7 +187,7 @@ async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_
                 color=discord.Color.red(),
                 timestamp=discord.utils.utcnow(),
             )
-            constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
+            constancia.add_field(name="👤 Usuario", value=f"{nombre}\n<@{user_id}>", inline=True)
             constancia.add_field(name="📋 Estado", value=f"Retiró un táser y no lo devolvió dentro de los {CHECK_WINDOW_MINUTES} minutos posteriores al fichaje de salida.", inline=False)
             await channel.send(embed=constancia)
             logger.info("Constancia enviada a canal %s", alert_channel_id)
@@ -191,7 +221,7 @@ async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_
         await log_actions.log_error("❌ Error verificación táser", f"Usuario <@{user_id}>\n`{e}`")
 
 
-def procesar_stash_para_taser(embed_data: dict) -> str | None:
+def procesar_stash_para_taser(embed_data: dict) -> dict | None:
     try:
         if embed_data.get("action") != "STASH":
             return None
@@ -199,10 +229,27 @@ def procesar_stash_para_taser(embed_data: dict) -> str | None:
             if _is_taser(item.get("name", "")):
                 user_id = embed_data.get("discord_id")
                 if user_id:
-                    db.set_taser_devuelto(user_id)
-                    item_name = item.get("name", "")
-                    logger.info("Taser devuelto por %s (stash detectado)", user_id)
-                    return item_name
+                    player = embed_data.get("player")
+                    if player:
+                        _player_names[user_id] = player
+
+                    result = db.set_taser_devuelto(user_id)
+
+                    ev = _pending_checks.pop(user_id, None)
+                    if ev:
+                        ev.set()
+
+                    if result:
+                        logger.info(
+                            "Taser devuelto por %s (stash detectado, record=%s, alerta_previa=%s)",
+                            user_id, result["record_id"], result["tuvo_alerta"],
+                        )
+                        return {
+                            "item_name": item.get("name", ""),
+                            "user_id": user_id,
+                            "record_id": result["record_id"],
+                            "tuvo_alerta": result["tuvo_alerta"],
+                        }
     except Exception as e:
         logger.error("Error en procesar_stash_para_taser: %s", e)
     return None
@@ -216,14 +263,12 @@ async def _esperar_fichaje_para_taser(bot, user_id, item_name, alert_channel_id)
     try:
         conn = db.get_conn()
         cur = conn.cursor()
-        # Check if user now has an active clock-in
         cur.execute(
             "SELECT id FROM fichaje_registros WHERE user_id = %s AND clock_out_at IS NULL LIMIT 1",
             (user_id,)
         )
         row = cur.fetchone()
         if row:
-            # Clocked in during the wait → link the taser to that record
             cur.execute(
                 "UPDATE fichaje_registros SET taser_retirado = TRUE WHERE id = %s AND taser_retirado = FALSE",
                 (row[0],)
@@ -232,13 +277,13 @@ async def _esperar_fichaje_para_taser(bot, user_id, item_name, alert_channel_id)
             if cur.rowcount:
                 logger.info("Taser vinculado retrospectivamente a fichaje: user=%s", user_id)
             cur.close()
-            conn.close()
+            db.close_conn(conn)
             return
 
         cur.close()
-        conn.close()
+        db.close_conn(conn)
 
-        # Still no clock-in → send constancia
+        nombre = _get_name(user_id)
         channel = bot.get_channel(alert_channel_id)
         if channel:
             constancia = discord.Embed(
@@ -246,14 +291,14 @@ async def _esperar_fichaje_para_taser(bot, user_id, item_name, alert_channel_id)
                 color=discord.Color.orange(),
                 timestamp=discord.utils.utcnow(),
             )
-            constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
+            constancia.add_field(name="👤 Usuario", value=f"{nombre}\n<@{user_id}>", inline=True)
             constancia.add_field(name="🔫 Item", value=f"`{item_name}`", inline=True)
             constancia.add_field(name="⏱ Espera", value=f"Pasaron {RETIRO_SIN_FICHAJE_WAIT_MINUTES} minutos desde el retiro sin que inicie fichaje.", inline=False)
             await channel.send(embed=constancia)
             logger.warning("Taser retirado sin fichaje tras %s min: user=%s", RETIRO_SIN_FICHAJE_WAIT_MINUTES, user_id)
             log_actions.log_warning(
                 "⚠️ Táser sin fichaje",
-                f"<@{user_id}> retiró `{item_name}` y no inició fichaje en {RETIRO_SIN_FICHAJE_WAIT_MINUTES} min."
+                f"{nombre} (<@{user_id}>) retiró `{item_name}` y no inició fichaje en {RETIRO_SIN_FICHAJE_WAIT_MINUTES} min."
             )
     except Exception as e:
         logger.error("Error en _esperar_fichaje_para_taser: %s", e)
@@ -269,6 +314,7 @@ async def verificar_pendientes_al_inicio(bot, alert_channel_id: int):
         logger.info("Procesando %s alertas pendientes...", len(pendientes))
         for row in pendientes:
             record_id, user_id = row[0], row[1]
+            nombre = _get_name(user_id)
             logger.info("Pendiente: %s (record=%s)", user_id, record_id)
             channel = bot.get_channel(alert_channel_id)
             if channel:
@@ -276,11 +322,11 @@ async def verificar_pendientes_al_inicio(bot, alert_channel_id: int):
                     title="⚠️ TASER NO DEVUELTO (PENDIENTE)",
                     color=discord.Color.orange(),
                 )
-                constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
+                constancia.add_field(name="👤 Usuario", value=f"{nombre}\n<@{user_id}>", inline=True)
                 constancia.add_field(name="📋 Estado", value="Retiró un táser en un turno anterior y no lo devolvió.", inline=False)
                 await channel.send(embed=constancia)
                 db.mark_alerta_enviada(record_id)
-                log_actions.log_warning("⏳ Alerta pendiente reenviada", f"<@{user_id}> - táser no devuelto de turno anterior.")
+                log_actions.log_warning("⏳ Alerta pendiente reenviada", f"{nombre} (<@{user_id}>) - táser no devuelto de turno anterior.")
     except Exception as e:
         logger.error("Error en verificar_pendientes_al_inicio: %s", e)
         await log_actions.log_error("❌ Error pendientes inicio", f"`{e}`")
@@ -292,9 +338,9 @@ async def recordatorio_loop(bot, alert_channel_id):
     try:
         records = db.get_records_para_recordatorio()
         for record_id, user_id in records:
+            nombre = _get_name(user_id)
             logger.info("Enviando recordatorio 24h para %s (record=%s)", user_id, record_id)
 
-            # constancia en el canal
             channel = bot.get_channel(alert_channel_id)
             if channel:
                 constancia = discord.Embed(
@@ -302,12 +348,11 @@ async def recordatorio_loop(bot, alert_channel_id):
                     color=discord.Color.orange(),
                     timestamp=discord.utils.utcnow(),
                 )
-                constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
+                constancia.add_field(name="👤 Usuario", value=f"{nombre}\n<@{user_id}>", inline=True)
                 constancia.add_field(name="⏰ Recordatorio", value="Sigue sin devolver el táser tras 24+ horas.", inline=False)
                 await channel.send(embed=constancia)
-                log_actions.log_warning("🔁 Recordatorio táser", f"<@{user_id}> - sin devolución tras 24h.")
+                log_actions.log_warning("🔁 Recordatorio táser", f"{nombre} (<@{user_id}>) - sin devolución tras 24h.")
 
-            # DM de recordatorio (solo si los DMs están activos)
             if TASER_DM_ENABLED:
                 member = None
                 for guild in bot.guilds:

@@ -130,13 +130,22 @@ async def on_message(message: discord.Message):
                 if taser_devuelto:
                     channel = bot.get_channel(ALERT_CHANNEL_ID)
                     if channel:
+                        user_id = taser_devuelto["user_id"]
+                        player = parsed.get("player") or ""
+                        titulo = "✅ TASER DEVUELTO - ALERTA RESUELTA" if taser_devuelto["tuvo_alerta"] else "✅ TASER DEVUELTO"
+                        desc = (
+                            f"El táser fue devuelto y los DMs fueron desactivados automáticamente."
+                            if taser_devuelto["tuvo_alerta"]
+                            else f"Táser devuelto correctamente."
+                        )
                         constancia = discord.Embed(
-                            title="✅ TÁSER DEVUELTO",
+                            title=titulo,
                             color=discord.Color.green(),
                             timestamp=discord.utils.utcnow(),
                         )
-                        constancia.add_field(name="👤 Usuario", value=f"<@{parsed.get('discord_id')}>", inline=True)
-                        constancia.add_field(name="📦 Item", value=f"`{taser_devuelto}`", inline=True)
+                        constancia.add_field(name="👤 Usuario", value=f"{player}\n<@{user_id}>", inline=True)
+                        constancia.add_field(name="📦 Item", value=f"`{taser_devuelto['item_name']}`", inline=True)
+                        constancia.add_field(name="📋 Detalle", value=desc, inline=False)
                         await channel.send(embed=constancia)
 
             if ITEMS_ACTIVO:
