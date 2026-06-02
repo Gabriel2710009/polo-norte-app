@@ -1,14 +1,30 @@
 import os
+import logging
 import psycopg2
-from datetime import datetime
+from psycopg2 import OperationalError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+logger = logging.getLogger("Database")
+
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
+
+def _try(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except OperationalError as e:
+        logger.error("Error de conexión DB: %s", e)
+        raise
+    except Exception as e:
+        logger.error("Error en DB: %s", e)
+        raise
+
+
 def init():
-    conn = get_conn()
+    logger.info("Inicializando base de datos...")
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS fichaje_registros (
@@ -25,9 +41,11 @@ def init():
     conn.commit()
     cur.close()
     conn.close()
+    logger.info("Tabla fichaje_registros lista.")
 
-def insert_clock_in(user_id: str, username: str):
-    conn = get_conn()
+
+def insert_clock_in(user_id: str, username: str) -> int:
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO fichaje_registros (user_id, username) VALUES (%s, %s) RETURNING id",
@@ -37,10 +55,12 @@ def insert_clock_in(user_id: str, username: str):
     conn.commit()
     cur.close()
     conn.close()
+    logger.debug("Clock-in insertado: user=%s id=%s", user_id, row_id)
     return row_id
 
+
 def get_active_clock_in(user_id: str):
-    conn = get_conn()
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM fichaje_registros WHERE user_id = %s AND clock_out_at IS NULL ORDER BY id DESC LIMIT 1",
@@ -51,8 +71,9 @@ def get_active_clock_in(user_id: str):
     conn.close()
     return row
 
+
 def close_clock_in(user_id: str) -> int | None:
-    conn = get_conn()
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute(
         "SELECT id FROM fichaje_registros WHERE user_id = %s AND clock_out_at IS NULL ORDER BY id DESC LIMIT 1",
@@ -62,27 +83,29 @@ def close_clock_in(user_id: str) -> int | None:
     if not row:
         cur.close()
         conn.close()
+        logger.debug("No se encontró clock-in activo para %s", user_id)
         return None
     record_id = row[0]
-    cur.execute(
-        "UPDATE fichaje_registros SET clock_out_at = NOW() WHERE id = %s",
-        (record_id,)
-    )
+    cur.execute("UPDATE fichaje_registros SET clock_out_at = NOW() WHERE id = %s", (record_id,))
     conn.commit()
     cur.close()
     conn.close()
+    logger.debug("Clock-out cerrado: user=%s record=%s", user_id, record_id)
     return record_id
 
+
 def set_taser_retirado(record_id: int):
-    conn = get_conn()
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute("UPDATE fichaje_registros SET taser_retirado = TRUE WHERE id = %s", (record_id,))
     conn.commit()
     cur.close()
     conn.close()
+    logger.debug("Taser retirado marcado: record=%s", record_id)
+
 
 def set_taser_devuelto(user_id: str):
-    conn = get_conn()
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute(
         """UPDATE fichaje_registros SET taser_devuelto = TRUE
@@ -94,9 +117,11 @@ def set_taser_devuelto(user_id: str):
     conn.commit()
     cur.close()
     conn.close()
+    logger.debug("Taser devuelto marcado: user=%s", user_id)
+
 
 def get_pending_alerts():
-    conn = get_conn()
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute(
         """SELECT * FROM fichaje_registros
@@ -106,12 +131,15 @@ def get_pending_alerts():
     rows = cur.fetchall()
     cur.close()
     conn.close()
+    logger.debug("Pending alerts: %s", len(rows))
     return rows
 
+
 def mark_alerta_enviada(record_id: int):
-    conn = get_conn()
+    conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute("UPDATE fichaje_registros SET alerta_enviada = TRUE WHERE id = %s", (record_id,))
     conn.commit()
     cur.close()
     conn.close()
+    logger.debug("Alerta marcada como enviada: record=%s", record_id)

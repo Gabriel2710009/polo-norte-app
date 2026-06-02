@@ -9,6 +9,7 @@ import database as db
 from validator import validate
 from parser import parse_embed
 import fichaje
+import log_actions
 
 load_dotenv()
 
@@ -18,6 +19,7 @@ LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", 0))
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", 0))
 ALERT_ROLE_ID = int(os.getenv("ALERT_ROLE_ID", 0))
 FICHAJE_CHANNEL_ID = int(os.getenv("FICHAJE_CHANNEL_ID", 0))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
 
 FICHAJE_ACTIVO = False
 
@@ -37,18 +39,36 @@ async def on_ready():
         logger.error("Faltan variables de entorno.")
         return
 
-    db.init()
-    logger.info("DB inicializada")
+    log_actions.setup(bot, LOG_CHANNEL_ID)
 
-    pendientes = db.get_pending_alerts()
-    if pendientes:
-        logger.info("Alertas pendientes encontradas: %s", len(pendientes))
-        await fichaje.verificar_pendientes_al_inicio(bot, ALERT_CHANNEL_ID, ALERT_ROLE_ID)
+    try:
+        db.init()
+        logger.info("DB inicializada correctamente")
+        log_actions.log_info("✅ DB inicializada", "Conexión a PostgreSQL establecida y tablas listas.")
+    except Exception as e:
+        logger.critical("Error inicializando DB: %s", e)
+        await log_actions.log_error("❌ Error DB", f"No se pudo inicializar la base de datos:\n`{e}`")
+        return
 
-    await bot.tree.sync()
-    logger.info("Comandos slash sincronizados")
+    try:
+        pendientes = db.get_pending_alerts()
+        if pendientes:
+            logger.info("Alertas pendientes encontradas: %s", len(pendientes))
+            log_actions.log_info("⏳ Alertas pendientes", f"Se encontraron {len(pendientes)} alertas de táser sin resolver del turno anterior.")
+            await fichaje.verificar_pendientes_al_inicio(bot, ALERT_CHANNEL_ID, ALERT_ROLE_ID)
+    except Exception as e:
+        logger.error("Error verificando pendientes: %s", e)
+        await log_actions.log_error("❌ Error pendientes", f"No se pudieron verificar alertas pendientes:\n`{e}`")
+
+    try:
+        await bot.tree.sync()
+        logger.info("Comandos slash sincronizados")
+    except Exception as e:
+        logger.error("Error sincronizando comandos: %s", e)
+        await log_actions.log_error("❌ Error sync", f"No se pudieron sincronizar los comandos slash:\n`{e}`")
 
     logger.info("Bot conectado como %s (%s)", bot.user, bot.user.id)
+    log_actions.log_info("🟢 Bot iniciado", f"Conectado como {bot.user} ({bot.user.id})")
 
 
 @bot.event
@@ -94,16 +114,32 @@ async def on_message(message: discord.Message):
                 alert.add_field(name="🔗 Log original", value=f"[Ver mensaje]({message.jump_url})", inline=False)
 
                 await channel.send(content=f"<@&{ALERT_ROLE_ID}>", embed=alert)
+                logger.info("ALERTA enviada: %s - %s", parsed.get("player"), ", ".join(lines))
+                log_actions.log_warning(
+                    "🚨 Alerta de stash",
+                    f"**Jugador:** {parsed.get('player')}\n"
+                    f"**Items:** {', '.join(lines)}\n"
+                    f"**Steam:** {parsed.get('identifier')}\n"
+                    f"[Ver log]({message.jump_url})"
+                )
 
         # ── Fichaje processing ──
         if FICHAJE_ACTIVO and message.channel.id == FICHAJE_CHANNEL_ID:
-            data = fichaje.parse_fichaje_embed(embed)
-            if not data:
-                continue
-            if data["tipo"] == "INICIO":
-                await fichaje.handle_clock_in(bot, embed, LOGS_CHANNEL_ID)
-            elif data["tipo"] == "CIERRE":
-                await fichaje.handle_clock_out(bot, embed, LOGS_CHANNEL_ID, ALERT_CHANNEL_ID, ALERT_ROLE_ID)
+            try:
+                data = fichaje.parse_fichaje_embed(embed)
+                if not data:
+                    continue
+                if data["tipo"] == "INICIO":
+                    await fichaje.handle_clock_in(bot, embed, LOGS_CHANNEL_ID)
+                    logger.info("Clock-in registrado: %s", data["user_id"])
+                    log_actions.log_info("🟢 Clock-in", f"Usuario <@{data['user_id']}> inició turno.")
+                elif data["tipo"] == "CIERRE":
+                    await fichaje.handle_clock_out(bot, embed, LOGS_CHANNEL_ID, ALERT_CHANNEL_ID, ALERT_ROLE_ID)
+                    logger.info("Clock-out registrado: %s", data["user_id"])
+                    log_actions.log_info("🔴 Clock-out", f"Usuario <@{data['user_id']}> cerró turno.")
+            except Exception as e:
+                logger.error("Error procesando fichaje: %s", e)
+                await log_actions.log_error("❌ Error fichaje", f"Error procesando embed de fichaje:\n`{e}`")
 
 
 @bot.tree.command(name="fichaje", description="Activa o desactiva el tracking de fichajes y táseres")
@@ -125,14 +161,22 @@ async def fichaje_toggle(interaction: discord.Interaction, estado: str = None):
 
     if estado.lower() in ("on", "1", "true", "si"):
         FICHAJE_ACTIVO = True
-        logger.info("Fichaje tracking activado")
+        logger.info("Fichaje tracking activado por %s", interaction.user)
+        log_actions.log_info("🟢 Fichaje ACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🟢 **Fichaje tracking ACTIVADO**\nSe están monitoreando los fichajes y el retorno de táseres.", ephemeral=True)
     elif estado.lower() in ("off", "0", "false", "no"):
         FICHAJE_ACTIVO = False
-        logger.info("Fichaje tracking desactivado")
+        logger.info("Fichaje tracking desactivado por %s", interaction.user)
+        log_actions.log_info("🔴 Fichaje DESACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
         await interaction.response.send_message("🔴 **Fichaje tracking DESACTIVADO**", ephemeral=True)
     else:
         await interaction.response.send_message("❌ Usá `/fichaje on` o `/fichaje off`", ephemeral=True)
+
+
+@bot.event
+async def on_error(event: str, *args, **kwargs):
+    logger.error("Error no manejado en evento %s", event, exc_info=True)
+    await log_actions.log_error(f"❌ Error en evento {event}", f"```py\n{args}\n{kwargs}\n```")
 
 
 if __name__ == "__main__":
