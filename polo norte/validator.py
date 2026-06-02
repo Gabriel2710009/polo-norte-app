@@ -1,15 +1,24 @@
-import sys
+import time
 from parser import parse_embed, extract_items
 from items import is_allowed, normalize, ITEM_ALIASES
 
 ROLE_ID = "<@&978342236771217480>"
 CHANNEL_ID = "1447055354339786762"
 
+RECENT_STASH: dict[str, float] = {}
+
 def validate(text: str) -> str:
     parsed = parse_embed(text)
+    action = parsed.get("action")
     raw_items = parsed.get("items", [])
     if not raw_items:
         raw_items = extract_items(text)
+
+    if action == "STASH":
+        for item in raw_items:
+            norm = normalize(item.get("name", ""))
+            if norm:
+                RECENT_STASH[norm] = time.time()
 
     illegal = []
     all_items_display = []
@@ -22,8 +31,16 @@ def validate(text: str) -> str:
 
         norm = normalize(name)
         if norm in ITEM_ALIASES or not is_allowed(norm):
+            if action == "RETRIEVE" and norm in RECENT_STASH:
+                if time.time() - RECENT_STASH[norm] <= 60:
+                    continue
             if norm not in [normalize(x) for x in illegal]:
                 illegal.append(display)
+
+    now = time.time()
+    for k in list(RECENT_STASH):
+        if now - RECENT_STASH[k] > 60:
+            del RECENT_STASH[k]
 
     if not illegal:
         return "STATUS: OK\nALERT: false"
@@ -48,5 +65,6 @@ def validate(text: str) -> str:
     )
 
 if __name__ == "__main__":
+    import sys
     text = sys.stdin.read()
     print(validate(text))

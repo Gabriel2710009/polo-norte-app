@@ -19,6 +19,12 @@ ALLOWED_ITEMS = {
 
     # ── Authorized tasers ──
     "weapon_stungun", "stungun", "taser", "weapon_taser",
+
+    # ── Medical ──
+    "medikit",
+
+    # ── Money ──
+    "money",
 }
 
 ITEM_ALIASES = {
@@ -61,13 +67,13 @@ ITEM_ALIASES = {
     "repairkit":          "unauthorized_tool",
     "chaleco":            "unauthorized_armor",
     "oxygenmask":         "unauthorized_gear",
-    "medikit":            "unauthorized_medical",
+
     "bandage":            "unauthorized_medical",
     "defibrillator":      "unauthorized_medical",
     "phone":              "unauthorized_electronics",
     "boombox":            "unauthorized_electronics",
     "bike":               "unauthorized_vehicle",
-    "money":              "unauthorized",
+
     "black_money":        "unauthorized",
     "police_cad":         "unauthorized",
     "lspd_badge":         "unauthorized",
