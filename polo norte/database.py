@@ -39,6 +39,16 @@ def init():
         )
     """)
     conn.commit()
+
+    # add columns introduced in later versions (safe re-run)
+    try:
+        cur.execute(
+            "ALTER TABLE fichaje_registros ADD COLUMN ultimo_dm_at TIMESTAMP DEFAULT NULL"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
     cur.close()
     conn.close()
     logger.info("Tabla fichaje_registros lista.")
@@ -104,6 +114,24 @@ def set_taser_retirado(record_id: int):
     logger.debug("Taser retirado marcado: record=%s", record_id)
 
 
+def mark_taser_retirado_activo(user_id: str):
+    conn = _try(get_conn)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE fichaje_registros SET taser_retirado = TRUE "
+        "WHERE user_id = %s AND clock_out_at IS NULL AND taser_retirado = FALSE",
+        (user_id,)
+    )
+    updated = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    if updated:
+        logger.debug("Taser retirado marcado (activo): user=%s", user_id)
+    else:
+        logger.debug("Sin clock-in activo para marcar taser retirado: user=%s", user_id)
+
+
 def set_taser_devuelto(user_id: str):
     conn = _try(get_conn)
     cur = conn.cursor()
@@ -143,3 +171,29 @@ def mark_alerta_enviada(record_id: int):
     cur.close()
     conn.close()
     logger.debug("Alerta marcada como enviada: record=%s", record_id)
+
+
+def set_ultimo_dm(record_id: int):
+    conn = _try(get_conn)
+    cur = conn.cursor()
+    cur.execute("UPDATE fichaje_registros SET ultimo_dm_at = NOW() WHERE id = %s", (record_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.debug("ultimo_dm_at actualizado: record=%s", record_id)
+
+
+def get_records_para_recordatorio():
+    conn = _try(get_conn)
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT id, user_id FROM fichaje_registros
+           WHERE taser_retirado = TRUE AND taser_devuelto = FALSE
+             AND ultimo_dm_at IS NOT NULL
+             AND ultimo_dm_at < NOW() - INTERVAL '24 hours'"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    logger.debug("Records para recordatorio: %s", len(rows))
+    return rows

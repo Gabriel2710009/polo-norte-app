@@ -22,6 +22,7 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
 
 ITEMS_ACTIVO = False
 FICHAJE_ACTIVO = False
+TASER_DM_ACTIVO = True
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("Main")
@@ -67,6 +68,13 @@ async def on_ready():
         logger.error("Error sincronizando comandos: %s", e)
         await log_actions.log_error("❌ Error sync", f"No se pudieron sincronizar los comandos slash:\n`{e}`")
 
+    try:
+        fichaje.iniciar_recordatorio_loop(bot, ALERT_CHANNEL_ID)
+        logger.info("Recordatorio loop iniciado")
+    except Exception as e:
+        logger.error("Error iniciando recordatorio loop: %s", e)
+        await log_actions.log_error("❌ Error recordatorio loop", f"No se pudo iniciar:\n`{e}`")
+
     logger.info("Bot conectado como %s (%s)", bot.user, bot.user.id)
     log_actions.log_info("🟢 Bot iniciado", f"Conectado como {bot.user} ({bot.user.id})")
 
@@ -88,6 +96,13 @@ async def on_message(message: discord.Message):
             parsed = parse_embed(text)
 
             if FICHAJE_ACTIVO and parsed:
+                # Detección en tiempo real de RETRIEVE de táser
+                if parsed.get("action") == "RETRIEVE":
+                    for item in parsed.get("items", []):
+                        if fichaje._is_taser(item.get("name", "")):
+                            db.mark_taser_retirado_activo(parsed.get("discord_id"))
+                            logger.info("Taser retirado en tiempo real: user=%s", parsed.get("discord_id"))
+
                 taser_devuelto = fichaje.procesar_stash_para_taser(parsed)
                 if taser_devuelto:
                     channel = bot.get_channel(ALERT_CHANNEL_ID)
@@ -146,7 +161,7 @@ async def on_message(message: discord.Message):
                     logger.info("Clock-in registrado: %s", data["user_id"])
                     log_actions.log_info("🟢 Clock-in", f"Usuario <@{data['user_id']}> inició turno.")
                 elif data["tipo"] == "CIERRE":
-                    await fichaje.handle_clock_out(bot, embed, LOGS_CHANNEL_ID, ALERT_CHANNEL_ID)
+                    await fichaje.handle_clock_out(bot, embed, LOGS_CHANNEL_ID, ALERT_CHANNEL_ID, TASER_DM_ACTIVO)
                     logger.info("Clock-out registrado: %s", data["user_id"])
                     log_actions.log_info("🔴 Clock-out", f"Usuario <@{data['user_id']}> cerró turno.")
             except Exception as e:
@@ -210,6 +225,35 @@ async def fichaje_toggle(interaction: discord.Interaction, estado: str = None):
         await interaction.response.send_message("🔴 **Fichaje tracking DESACTIVADO**", ephemeral=True)
     else:
         await interaction.response.send_message("❌ Usá `/fichaje on` o `/fichaje off`", ephemeral=True)
+
+
+@bot.tree.command(name="taser-dm", description="Activa o desactiva los mensajes al DM por táser no devuelto")
+@app_commands.describe(estado="on para activar, off para desactivar")
+async def taser_dm_toggle(interaction: discord.Interaction, estado: str = None):
+    global TASER_DM_ACTIVO
+
+    if estado is None:
+        estado_actual = "🟢 ACTIVOS" if TASER_DM_ACTIVO else "🔴 INACTIVOS"
+        await interaction.response.send_message(
+            f"📋 DM por táser: {estado_actual}\nUsá `/taser-dm on` o `/taser-dm off` para cambiar.",
+            ephemeral=True,
+        )
+        return
+
+    if estado.lower() in ("on", "1", "true", "si"):
+        TASER_DM_ACTIVO = True
+        fichaje.set_taser_dm_enabled(True)
+        logger.info("DM de táser activado por %s", interaction.user)
+        log_actions.log_info("🟢 Taser-DM ACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
+        await interaction.response.send_message("🟢 **DM de táser ACTIVADO**\nSe enviará DM a quienes no devuelvan el táser.", ephemeral=True)
+    elif estado.lower() in ("off", "0", "false", "no"):
+        TASER_DM_ACTIVO = False
+        fichaje.set_taser_dm_enabled(False)
+        logger.info("DM de táser desactivado por %s", interaction.user)
+        log_actions.log_info("🔴 Taser-DM DESACTIVADO", f"Por {interaction.user.mention} (`{interaction.user.id}`)")
+        await interaction.response.send_message("🔴 **DM de táser DESACTIVADO**\nNo se enviarán mensajes directos.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Usá `/taser-dm on` o `/taser-dm off`", ephemeral=True)
 
 
 @bot.event

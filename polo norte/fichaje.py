@@ -3,6 +3,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from discord.ext import tasks
+
 import discord
 import database as db
 import log_actions
@@ -10,6 +12,7 @@ from parser import parse_embed
 
 TASER_ITEMS = {"weapon_stungun", "stungun", "taser", "weapon_taser"}
 CHECK_WINDOW_MINUTES = 10
+TASER_DM_ENABLED = True
 
 logger = logging.getLogger("Fichaje")
 
@@ -90,7 +93,7 @@ async def handle_clock_in(bot, embed, logs_channel_id: int):
         await log_actions.log_error("❌ Error clock-in", f"`{e}`")
 
 
-async def handle_clock_out(bot, embed, logs_channel_id: int, alert_channel_id: int):
+async def handle_clock_out(bot, embed, logs_channel_id: int, alert_channel_id: int, taser_dm_activo: bool = True):
     try:
         data = parse_fichaje_embed(embed)
         if not data:
@@ -106,14 +109,14 @@ async def handle_clock_out(bot, embed, logs_channel_id: int, alert_channel_id: i
         log_actions.log_info("🔴 Clock-out registrado", f"<@{data['user_id']}> cerró turno (ID {record_id}).")
 
         asyncio.create_task(
-            _esperar_y_verificar(bot, data["user_id"], record_id, alert_channel_id)
+            _esperar_y_verificar(bot, data["user_id"], record_id, alert_channel_id, taser_dm_activo)
         )
     except Exception as e:
         logger.error("Error en handle_clock_out: %s", e)
         await log_actions.log_error("❌ Error clock-out", f"`{e}`")
 
 
-async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id):
+async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_dm_activo: bool = True):
     await asyncio.sleep(CHECK_WINDOW_MINUTES * 60)
 
     try:
@@ -159,26 +162,29 @@ async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id):
             await channel.send(embed=constancia)
             logger.info("Constancia enviada a canal %s", alert_channel_id)
 
-        try:
-            member = None
-            for guild in bot.guilds:
-                try:
-                    member = await guild.fetch_member(int(user_id))
-                    if member:
-                        break
-                except Exception:
-                    continue
-            if member:
-                await member.send(
-                    "⚠️ **TASER NO DEVUELTO**\n\n"
-                    "Nuestro sistema detectó que retiraste un táser durante tu turno "
-                    f"y no lo devolviste dentro de los {CHECK_WINDOW_MINUTES} minutos posteriores al fichaje de salida.\n"
-                    "Por favor, devolvelo a la armería lo antes posible."
-                )
-                logger.info("DM enviado a %s por táser no devuelto", user_id)
-        except Exception as exc:
-            logger.warning("No se pudo enviar DM a %s: %s", user_id, exc)
-            log_actions.log_warning("⚠️ DM fallido", f"No se pudo enviar DM a <@{user_id}>:\n`{exc}`")
+        if taser_dm_activo:
+            try:
+                member = None
+                for guild in bot.guilds:
+                    try:
+                        member = await guild.fetch_member(int(user_id))
+                        if member:
+                            break
+                    except Exception:
+                        continue
+                if member:
+                    await member.send(
+                        "⚠️ **TASER NO DEVUELTO**\n\n"
+                        "Nuestro sistema detectó que retiraste un táser durante tu turno "
+                        f"y no lo devolviste dentro de los {CHECK_WINDOW_MINUTES} minutos posteriores al fichaje de salida.\n"
+                        "Por favor, devolvelo a la armería lo antes posible.\n\n"
+                        "⏰ *Recibirás un recordatorio cada 24 horas hasta que lo devuelvas.*"
+                    )
+                    logger.info("DM enviado a %s por táser no devuelto", user_id)
+                    db.set_ultimo_dm(record_id)
+            except Exception as exc:
+                logger.warning("No se pudo enviar DM a %s: %s", user_id, exc)
+                log_actions.log_warning("⚠️ DM fallido", f"No se pudo enviar DM a <@{user_id}>:\n`{exc}`")
 
     except Exception as e:
         logger.error("Error en verificación de táser para %s: %s", user_id, e)
@@ -221,7 +227,69 @@ async def verificar_pendientes_al_inicio(bot, alert_channel_id: int):
                 constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
                 constancia.add_field(name="📋 Estado", value="Retiró un táser en un turno anterior y no lo devolvió.", inline=False)
                 await channel.send(embed=constancia)
+                db.mark_alerta_enviada(record_id)
                 log_actions.log_warning("⏳ Alerta pendiente reenviada", f"<@{user_id}> - táser no devuelto de turno anterior.")
     except Exception as e:
         logger.error("Error en verificar_pendientes_al_inicio: %s", e)
         await log_actions.log_error("❌ Error pendientes inicio", f"`{e}`")
+
+
+@tasks.loop(hours=1)
+async def recordatorio_loop(bot, alert_channel_id):
+    logger.debug("Ejecutando recordatorio_loop...")
+    try:
+        records = db.get_records_para_recordatorio()
+        for record_id, user_id in records:
+            logger.info("Enviando recordatorio 24h para %s (record=%s)", user_id, record_id)
+
+            # constancia en el canal
+            channel = bot.get_channel(alert_channel_id)
+            if channel:
+                constancia = discord.Embed(
+                    title="🔁 RECORDATORIO TÁSER NO DEVUELTO",
+                    color=discord.Color.orange(),
+                    timestamp=discord.utils.utcnow(),
+                )
+                constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
+                constancia.add_field(name="⏰ Recordatorio", value="Sigue sin devolver el táser tras 24+ horas.", inline=False)
+                await channel.send(embed=constancia)
+                log_actions.log_warning("🔁 Recordatorio táser", f"<@{user_id}> - sin devolución tras 24h.")
+
+            # DM de recordatorio (solo si los DMs están activos)
+            if TASER_DM_ENABLED:
+                member = None
+                for guild in bot.guilds:
+                    try:
+                        member = await guild.fetch_member(int(user_id))
+                        if member:
+                            break
+                    except Exception:
+                        continue
+                if member:
+                    try:
+                        await member.send(
+                            "🔁 **RECORDATORIO - TÁSER NO DEVUELTO**\n\n"
+                            "Nuestro sistema detectó que aún no has devuelto el táser que retiraste.\n"
+                            "Por favor, devolvelo a la armería lo antes posible para evitar sanciones.\n\n"
+                            "⏰ *Recibirás este recordatorio cada 24 horas hasta que lo devuelvas.*"
+                        )
+                        logger.info("Recordatorio DM enviado a %s", user_id)
+                    except Exception as exc:
+                        logger.warning("No se pudo enviar recordatorio DM a %s: %s", user_id, exc)
+
+            db.set_ultimo_dm(record_id)
+    except Exception as e:
+        logger.error("Error en recordatorio_loop: %s", e)
+        await log_actions.log_error("❌ Error recordatorio loop", f"`{e}`")
+
+
+def iniciar_recordatorio_loop(bot, alert_channel_id):
+    if not recordatorio_loop.is_running():
+        recordatorio_loop.start(bot, alert_channel_id)
+        logger.info("Recordatorio loop iniciado (cada 1 hora).")
+
+
+def set_taser_dm_enabled(val: bool):
+    global TASER_DM_ENABLED
+    TASER_DM_ENABLED = val
+    logger.info("TASER_DM_ENABLED = %s", val)
