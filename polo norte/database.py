@@ -1,10 +1,13 @@
 import os
+import time
 import logging
 import psycopg2
 from psycopg2 import OperationalError
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger("Database")
+_RETRIES = 3
+_RETRY_DELAYS = [2, 4, 8]
 
 
 def get_conn():
@@ -12,14 +15,25 @@ def get_conn():
 
 
 def _try(func, *args, **kwargs):
-    try:
-        return func(*args, **kwargs)
-    except OperationalError as e:
-        logger.error("Error de conexión DB: %s", e)
-        raise
-    except Exception as e:
-        logger.error("Error en DB: %s", e)
-        raise
+    last_exc = None
+    for attempt in range(1, _RETRIES + 1):
+        try:
+            return func(*args, **kwargs)
+        except OperationalError as e:
+            last_exc = e
+            if attempt < _RETRIES:
+                delay = _RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "Intento %s/%s falló, reintentando en %ss: %s",
+                    attempt, _RETRIES, delay, e
+                )
+                time.sleep(delay)
+            else:
+                logger.error("Error de conexión DB tras %s intentos: %s", _RETRIES, e)
+        except Exception as e:
+            logger.error("Error en DB: %s", e)
+            raise
+    raise last_exc
 
 
 def init():
@@ -114,22 +128,29 @@ def set_taser_retirado(record_id: int):
     logger.debug("Taser retirado marcado: record=%s", record_id)
 
 
-def mark_taser_retirado_activo(user_id: str):
+def mark_taser_retirado_activo(user_id: str) -> bool:
+    """Returns True if there was an active clock-in, False otherwise."""
     conn = _try(get_conn)
     cur = conn.cursor()
     cur.execute(
-        "UPDATE fichaje_registros SET taser_retirado = TRUE "
-        "WHERE user_id = %s AND clock_out_at IS NULL AND taser_retirado = FALSE",
+        "SELECT id FROM fichaje_registros WHERE user_id = %s AND clock_out_at IS NULL LIMIT 1",
         (user_id,)
     )
-    updated = cur.rowcount
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        logger.debug("Sin clock-in activo para marcar taser retirado: user=%s", user_id)
+        return False
+    cur.execute(
+        "UPDATE fichaje_registros SET taser_retirado = TRUE WHERE id = %s AND taser_retirado = FALSE",
+        (row[0],)
+    )
     conn.commit()
     cur.close()
     conn.close()
-    if updated:
-        logger.debug("Taser retirado marcado (activo): user=%s", user_id)
-    else:
-        logger.debug("Sin clock-in activo para marcar taser retirado: user=%s", user_id)
+    logger.debug("Taser retirado marcado (activo): user=%s", user_id)
+    return True
 
 
 def set_taser_devuelto(user_id: str):

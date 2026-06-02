@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import discord
 from discord import app_commands
@@ -100,8 +101,19 @@ async def on_message(message: discord.Message):
                 if parsed.get("action") == "RETRIEVE":
                     for item in parsed.get("items", []):
                         if fichaje._is_taser(item.get("name", "")):
-                            db.mark_taser_retirado_activo(parsed.get("discord_id"))
-                            logger.info("Taser retirado en tiempo real: user=%s", parsed.get("discord_id"))
+                            tenia_fichaje = db.mark_taser_retirado_activo(parsed.get("discord_id"))
+                            if tenia_fichaje:
+                                logger.info("Taser retirado vinculado a fichaje activo: user=%s", parsed.get("discord_id"))
+                            else:
+                                # Dar tiempo para que inicie fichaje
+                                asyncio.create_task(
+                                    fichaje._esperar_fichaje_para_taser(
+                                        bot, parsed.get("discord_id"),
+                                        item["name"], ALERT_CHANNEL_ID
+                                    )
+                                )
+                                logger.info("Taser retirado sin fichaje - esperando %s min: user=%s",
+                                            fichaje.RETIRO_SIN_FICHAJE_WAIT_MINUTES, parsed.get("discord_id"))
 
                 taser_devuelto = fichaje.procesar_stash_para_taser(parsed)
                 if taser_devuelto:

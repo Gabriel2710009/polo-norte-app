@@ -208,6 +208,58 @@ def procesar_stash_para_taser(embed_data: dict) -> str | None:
     return None
 
 
+RETIRO_SIN_FICHAJE_WAIT_MINUTES = 5
+
+
+async def _esperar_fichaje_para_taser(bot, user_id, item_name, alert_channel_id):
+    await asyncio.sleep(RETIRO_SIN_FICHAJE_WAIT_MINUTES * 60)
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor()
+        # Check if user now has an active clock-in
+        cur.execute(
+            "SELECT id FROM fichaje_registros WHERE user_id = %s AND clock_out_at IS NULL LIMIT 1",
+            (user_id,)
+        )
+        row = cur.fetchone()
+        if row:
+            # Clocked in during the wait → link the taser to that record
+            cur.execute(
+                "UPDATE fichaje_registros SET taser_retirado = TRUE WHERE id = %s AND taser_retirado = FALSE",
+                (row[0],)
+            )
+            conn.commit()
+            if cur.rowcount:
+                logger.info("Taser vinculado retrospectivamente a fichaje: user=%s", user_id)
+            cur.close()
+            conn.close()
+            return
+
+        cur.close()
+        conn.close()
+
+        # Still no clock-in → send constancia
+        channel = bot.get_channel(alert_channel_id)
+        if channel:
+            constancia = discord.Embed(
+                title="⚠️ TASER RETIRADO SIN FICHAJE",
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow(),
+            )
+            constancia.add_field(name="👤 Usuario", value=f"<@{user_id}>", inline=True)
+            constancia.add_field(name="🔫 Item", value=f"`{item_name}`", inline=True)
+            constancia.add_field(name="⏱ Espera", value=f"Pasaron {RETIRO_SIN_FICHAJE_WAIT_MINUTES} minutos desde el retiro sin que inicie fichaje.", inline=False)
+            await channel.send(embed=constancia)
+            logger.warning("Taser retirado sin fichaje tras %s min: user=%s", RETIRO_SIN_FICHAJE_WAIT_MINUTES, user_id)
+            log_actions.log_warning(
+                "⚠️ Táser sin fichaje",
+                f"<@{user_id}> retiró `{item_name}` y no inició fichaje en {RETIRO_SIN_FICHAJE_WAIT_MINUTES} min."
+            )
+    except Exception as e:
+        logger.error("Error en _esperar_fichaje_para_taser: %s", e)
+        await log_actions.log_error("❌ Error espera fichaje", f"Usuario <@{user_id}>\n`{e}`")
+
+
 async def verificar_pendientes_al_inicio(bot, alert_channel_id: int):
     try:
         pendientes = db.get_pending_alerts()
