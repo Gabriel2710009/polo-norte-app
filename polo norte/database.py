@@ -232,7 +232,7 @@ def set_taser_devuelto(user_id: str):
     conn = _try_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, alerta_enviada FROM fichaje_registros WHERE user_id = %s AND clock_out_at IS NOT NULL"
+        "SELECT id, alerta_enviada FROM fichaje_registros WHERE user_id = %s"
         " AND taser_retirado = TRUE AND taser_devuelto = FALSE ORDER BY id DESC LIMIT 1",
         (user_id,),
     )
@@ -246,11 +246,11 @@ def set_taser_devuelto(user_id: str):
         conn.commit()
         cur.close()
         close_conn(conn)
-        logger.debug("Taser devuelto marcado: user=%s record=%s", user_id, record_id)
+        logger.info("Taser devuelto marcado para %s (record=%s)", user_id, record_id)
         return {"record_id": record_id, "tuvo_alerta": tuvo_alerta}
     cur.close()
     close_conn(conn)
-    logger.debug("Taser devuelto: no se encontró record activo para user=%s", user_id)
+    logger.info("No se encontró registro pendiente de devolución para %s", user_id)
     return None
 
 
