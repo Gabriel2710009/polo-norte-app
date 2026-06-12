@@ -11,6 +11,7 @@ from validator import validate
 from parser import parse_embed
 import fichaje
 import log_actions
+import aprobar
 
 load_dotenv()
 
@@ -42,6 +43,7 @@ async def on_ready():
         return
 
     log_actions.setup(bot, LOG_CHANNEL_ID)
+    await aprobar.setup(bot)
 
     try:
         db.init()
