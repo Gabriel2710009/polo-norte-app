@@ -12,6 +12,8 @@ from parser import parse_embed
 import fichaje
 import log_actions
 import aprobar
+import blacklist_cog
+import help_cog
 
 load_dotenv()
 
@@ -21,6 +23,24 @@ LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", 0))
 ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", 0))
 FICHAJE_CHANNEL_ID = int(os.getenv("FICHAJE_CHANNEL_ID", 0))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
+
+BLACKLIST_POSTULACIONES_ROLE_ID = int(os.getenv("BLACKLIST_POSTULACIONES_ROLE_ID", 0))
+BLACKLIST_LOG_CHANNEL_ID = int(os.getenv("BLACKLIST_LOG_CHANNEL_ID", 0))
+POSTULACIONES_CATEGORY_ID = int(os.getenv("POSTULACIONES_CATEGORY_ID", 0))
+
+# Roles que evitan el bloqueo de blacklist (separados por coma)
+_raw_bypass = os.getenv("BLACKLIST_BYPASS_ROLE_IDS", "")
+BLACKLIST_BYPASS_ROLE_IDS = set()
+for _rid in _raw_bypass.split(","):
+    _rid = _rid.strip()
+    if _rid:
+        BLACKLIST_BYPASS_ROLE_IDS.add(int(_rid))
+
+# Si es "false" (case-insensitive), desactiva el respaldo por rol
+BLACKLIST_ALLOW_ROLE_FALLBACK = os.getenv("BLACKLIST_ALLOW_ROLE_FALLBACK", "true").lower() == "true"
+
+BLACKLIST_STAFF_ALERT_CHANNEL_ID = int(os.getenv("BLACKLIST_STAFF_ALERT_CHANNEL_ID", 0))
+BLACKLIST_STAFF_ALERT_ROLE_ID = int(os.getenv("BLACKLIST_STAFF_ALERT_ROLE_ID", 0))
 
 ITEMS_ACTIVO = False
 FICHAJE_ACTIVO = False
@@ -44,6 +64,16 @@ async def on_ready():
 
     log_actions.setup(bot, LOG_CHANNEL_ID)
     await aprobar.setup(bot)
+
+    blacklist_cog.BLACKLIST_POSTULACIONES_ROLE_ID = BLACKLIST_POSTULACIONES_ROLE_ID
+    blacklist_cog.BLACKLIST_LOG_CHANNEL_ID = BLACKLIST_LOG_CHANNEL_ID
+    blacklist_cog.POSTULACIONES_CATEGORY_ID = POSTULACIONES_CATEGORY_ID
+    blacklist_cog.BLACKLIST_BYPASS_ROLE_IDS = BLACKLIST_BYPASS_ROLE_IDS
+    blacklist_cog.BLACKLIST_ALLOW_ROLE_FALLBACK = BLACKLIST_ALLOW_ROLE_FALLBACK
+    blacklist_cog.BLACKLIST_STAFF_ALERT_CHANNEL_ID = BLACKLIST_STAFF_ALERT_CHANNEL_ID
+    blacklist_cog.BLACKLIST_STAFF_ALERT_ROLE_ID = BLACKLIST_STAFF_ALERT_ROLE_ID
+    await blacklist_cog.setup(bot)
+    await help_cog.setup(bot)
 
     try:
         db.init()
