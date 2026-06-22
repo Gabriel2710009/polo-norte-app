@@ -227,6 +227,40 @@ class TestExtraerNombreIC(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────
+# Pruebas de resolución de usuario (regex)
+# ─────────────────────────────────────────────
+
+class TestResolverRegex(unittest.TestCase):
+    def test_mention_normal(self):
+        m = blacklist_cog._MENTION_PATTERN.match("<@123456789012345678>")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "123456789012345678")
+
+    def test_mention_nickname(self):
+        m = blacklist_cog._MENTION_PATTERN.match("<@!123456789012345678>")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "123456789012345678")
+
+    def test_mention_no_match_sin_corchetes(self):
+        self.assertIsNone(blacklist_cog._MENTION_PATTERN.match("123"))
+
+    def test_id_valido(self):
+        m = blacklist_cog._ID_PATTERN.match("123456789012345678")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "123456789012345678")
+
+    def test_id_muy_corto(self):
+        self.assertIsNone(blacklist_cog._ID_PATTERN.match("12345"))
+
+    def test_id_con_letras(self):
+        self.assertIsNone(blacklist_cog._ID_PATTERN.match("1234567890abcdefgh"))
+
+    def test_string_vacio(self):
+        self.assertIsNone(blacklist_cog._ID_PATTERN.match(""))
+        self.assertIsNone(blacklist_cog._MENTION_PATTERN.match(""))
+
+
+# ─────────────────────────────────────────────
 # Pruebas de inconsistencias
 # ─────────────────────────────────────────────
 

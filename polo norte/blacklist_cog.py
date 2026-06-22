@@ -165,6 +165,62 @@ async def _enviar_embed_log(bot: commands.Bot, embed: discord.Embed):
         )
 
 
+# ── Resolución de usuario ─────────────────
+
+_ID_PATTERN = re.compile(r"^(\d{17,20})$")
+_MENTION_PATTERN = re.compile(r"^<@!?(\d{17,20})>$")
+
+
+async def _resolver_usuario(interaction: discord.Interaction, texto: str):
+    """
+    Convierte una mención o ID de Discord en (discord_id_str, usuario_obj, error_msg).
+
+    - texto: '@usuario', '<@123>', '<@!123>' o '123456789'
+    - Retorna (id_str, Member|User|None, error_str|None)
+    """
+    texto = texto.strip()
+
+    m = _MENTION_PATTERN.match(texto)
+    if m:
+        discord_id = m.group(1)
+    else:
+        m = _ID_PATTERN.match(texto)
+        if not m:
+            return None, None, (
+                "Formato inválido. Usá una mención (@Usuario) o un ID numérico de Discord.\n"
+                "Ejemplo: `/blacklist 1389546682076631141 motivo`"
+            )
+        discord_id = m.group(1)
+
+    usuario = None
+    guild = interaction.guild
+
+    # Intentar resolver como Member (dentro del servidor)
+    if guild:
+        usuario = guild.get_member(int(discord_id))
+        if not usuario:
+            try:
+                usuario = await guild.fetch_member(int(discord_id))
+            except discord.NotFound:
+                pass
+            except (discord.HTTPException, discord.Forbidden):
+                pass
+
+    # Resolver como User global (fuera del servidor)
+    if not usuario:
+        try:
+            usuario = await interaction.client.fetch_user(int(discord_id))
+        except discord.NotFound:
+            return discord_id, None, (
+                "No se encontró un usuario de Discord con ese ID.\n"
+                "Verificá que el ID sea correcto e intentá de nuevo."
+            )
+        except (discord.HTTPException, discord.Forbidden) as e:
+            return discord_id, None, f"Error al verificar el ID: {e}"
+
+    return discord_id, usuario, None
+
+
 # ── Comandos ──────────────────────────────
 
 ENTRIES_PER_PAGE = 10
@@ -175,8 +231,11 @@ def _setup_blacklist_commands(bot: commands.Bot):
     # ── /blacklist ──────────────────────────
 
     @bot.tree.command(name="blacklist", description="Agrega un usuario a la blacklist de postulaciones")
-    @app_commands.describe(usuario="Usuario a blacklistear", motivo="Motivo de la blacklist")
-    async def blacklist(interaction: discord.Interaction, usuario: discord.Member, motivo: str):
+    @app_commands.describe(
+        usuario="Mención (@Usuario) o Discord ID del usuario a blacklistear",
+        motivo="Motivo de la blacklist",
+    )
+    async def blacklist(interaction: discord.Interaction, usuario: str, motivo: str):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
@@ -185,7 +244,12 @@ def _setup_blacklist_commands(bot: commands.Bot):
             await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
             return
 
-        uid = str(usuario.id)
+        discord_id, usuario_obj, error = await _resolver_usuario(interaction, usuario)
+        if error:
+            await interaction.response.send_message(f"\u274c {error}", ephemeral=True)
+            return
+
+        uid = discord_id
 
         existente = db.obtener(uid)
         if existente:
@@ -217,7 +281,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                     continue
                 canal_ticket: discord.TextChannel = channel
                 try:
-                    permisos = canal_ticket.permissions_for(usuario)
+                    permisos = canal_ticket.permissions_for(usuario_obj)
                 except Exception:
                     continue
                 if not (permisos.read_messages and permisos.send_messages):
@@ -244,15 +308,16 @@ def _setup_blacklist_commands(bot: commands.Bot):
             )
             return
 
+        es_member = isinstance(usuario_obj, discord.Member)
         rol_ok = True
-        if BLACKLIST_POSTULACIONES_ROLE_ID:
+        if es_member and BLACKLIST_POSTULACIONES_ROLE_ID:
             rol = interaction.guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
             if rol:
                 try:
-                    await usuario.add_roles(rol, reason="Blacklist de postulaciones")
+                    await usuario_obj.add_roles(rol, reason="Blacklist de postulaciones")
                 except Exception as e:
                     rol_ok = False
-                    logger.error("No se pudo asignar rol de blacklist a %s: %s", usuario.id, e)
+                    logger.error("No se pudo asignar rol de blacklist a %s: %s", uid, e)
                     await log_actions.log_error(
                         "\U0001f6ab Error asignando rol blacklist",
                         f"Usuario: <@{uid}>\nRol: <@&{BLACKLIST_POSTULACIONES_ROLE_ID}>\nError: `{e}`",
@@ -270,7 +335,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(name="Nombre IC", value=nombre_ic, inline=True)
-        embed.add_field(name="Discord", value=f"<@{usuario.id}>\n`{usuario.id}`", inline=False)
+        embed.add_field(name="Discord", value=f"<@{uid}>\n`{uid}`", inline=False)
         embed.add_field(name="Motivo", value=motivo, inline=False)
         embed.add_field(name="Aplicada por", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
         embed.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
@@ -278,19 +343,26 @@ def _setup_blacklist_commands(bot: commands.Bot):
             embed.add_field(name="Ticket origen", value=f"<#{ticket_origen_id}>", inline=True)
         if not rol_ok:
             embed.add_field(name="\u26a0\ufe0f Rol", value="No se pudo asignar (revisar jerarquía).", inline=False)
-        embed.set_footer(text=f"ID: {usuario.id}")
+        elif not es_member:
+            embed.add_field(name="\u2139\ufe0f Rol", value="Usuario no está en el servidor. Solo se registró en DB.", inline=False)
+        embed.set_footer(text=f"ID: {uid}")
 
         await _enviar_embed_log(bot, embed)
 
         log_actions.log_info(
             "\U0001f6ab Blacklist aplicada",
-            f"**Usuario:** {usuario} (`{usuario.id}`)\n"
+            f"**Usuario:** <@{uid}> (`{uid}`)\n"
             f"**Nombre IC:** {nombre_ic}\n"
             f"**Motivo:** {motivo}\n"
             f"**Staff:** {interaction.user} (`{interaction.user.id}`)",
         )
 
-        if rol_ok:
+        if not es_member:
+            await interaction.followup.send(
+                "\u2705 Blacklist aplicada en DB. El usuario no está en el servidor, no se asignó rol.",
+                ephemeral=True,
+            )
+        elif rol_ok:
             await interaction.followup.send("\u2705 Blacklist aplicada correctamente.", ephemeral=True)
         else:
             await interaction.followup.send(
@@ -302,8 +374,8 @@ def _setup_blacklist_commands(bot: commands.Bot):
     # ── /unblacklist ────────────────────────
 
     @bot.tree.command(name="unblacklist", description="Quita un usuario de la blacklist de postulaciones")
-    @app_commands.describe(usuario="Usuario a desblacklistear")
-    async def unblacklist(interaction: discord.Interaction, usuario: discord.Member):
+    @app_commands.describe(usuario="Mención (@Usuario) o Discord ID del usuario a desblacklistear")
+    async def unblacklist(interaction: discord.Interaction, usuario: str):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
@@ -312,30 +384,38 @@ def _setup_blacklist_commands(bot: commands.Bot):
             await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
             return
 
+        discord_id, usuario_obj, error = await _resolver_usuario(interaction, usuario)
+        if error:
+            await interaction.response.send_message(f"\u274c {error}", ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True)
 
-        uid = str(usuario.id)
+        uid = discord_id
 
         registro_previo = db.obtener(uid)
         eliminado = db.eliminar(uid)
 
+        tenia_rol = False
         rol_ok = True
-        if BLACKLIST_POSTULACIONES_ROLE_ID:
+        es_member = isinstance(usuario_obj, discord.Member)
+        if es_member and BLACKLIST_POSTULACIONES_ROLE_ID:
             rol = interaction.guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
-            if rol and rol in usuario.roles:
+            if rol and rol in usuario_obj.roles:
+                tenia_rol = True
                 try:
-                    await usuario.remove_roles(rol, reason="Unblacklist de postulaciones")
+                    await usuario_obj.remove_roles(rol, reason="Unblacklist de postulaciones")
                 except Exception as e:
                     rol_ok = False
-                    logger.error("No se pudo remover rol de blacklist a %s: %s", usuario.id, e)
+                    logger.error("No se pudo remover rol de blacklist a %s: %s", uid, e)
                     await log_actions.log_error(
                         "\u2705 Error removiendo rol blacklist",
                         f"Usuario: <@{uid}>\nError: `{e}`",
                     )
 
-        if not eliminado and not (rol and rol in usuario.roles if BLACKLIST_POSTULACIONES_ROLE_ID and (rol := interaction.guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)) else False):
+        if not eliminado and not tenia_rol:
             await interaction.followup.send(
-                f"\u26a0\ufe0f {usuario.mention} no estaba en blacklist ni tenía el rol.", ephemeral=True,
+                f"\u26a0\ufe0f <@{uid}> no estaba en blacklist ni tenía el rol.", ephemeral=True,
             )
             return
 
@@ -348,7 +428,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
             timestamp=discord.utils.utcnow(),
         )
         embed_log.add_field(name="Nombre IC", value=nombre_ic_log, inline=True)
-        embed_log.add_field(name="Discord", value=f"<@{usuario.id}>\n`{usuario.id}`", inline=False)
+        embed_log.add_field(name="Discord", value=f"<@{uid}>\n`{uid}`", inline=False)
         embed_log.add_field(name="Retirada por", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
         embed_log.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
         embed_log.add_field(name="Motivo original", value=motivo_original, inline=False)
@@ -356,25 +436,25 @@ def _setup_blacklist_commands(bot: commands.Bot):
             embed_log.add_field(name="\u26a0\ufe0f Nota", value="Solo se removió el rol (no estaba en DB).", inline=False)
         if not rol_ok:
             embed_log.add_field(name="\u26a0\ufe0f Rol", value="No se pudo remover (revisar jerarquía).", inline=False)
-        embed_log.set_footer(text=f"ID: {usuario.id}")
+        embed_log.set_footer(text=f"ID: {uid}")
 
         await _enviar_embed_log(bot, embed_log)
 
         log_actions.log_info(
             "\u2705 Blacklist removida",
-            f"**Usuario:** {usuario} (`{usuario.id}`)\n"
+            f"**Usuario:** <@{uid}> (`{uid}`)\n"
             f"**Nombre IC:** {nombre_ic_log}\n"
             f"**Motivo original:** {motivo_original}\n"
             f"**Staff:** {interaction.user} (`{interaction.user.id}`)",
         )
 
-        await interaction.followup.send(f"\u2705 {usuario.mention} procesado.", ephemeral=True)
+        await interaction.followup.send(f"\u2705 <@{uid}> procesado.", ephemeral=True)
 
     # ── /blacklist-info ─────────────────────
 
     @bot.tree.command(name="blacklist-info", description="Muestra información de blacklist de un usuario")
-    @app_commands.describe(usuario="Usuario a consultar")
-    async def blacklist_info(interaction: discord.Interaction, usuario: discord.Member):
+    @app_commands.describe(usuario="Mención (@Usuario) o Discord ID del usuario a consultar")
+    async def blacklist_info(interaction: discord.Interaction, usuario: str):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
@@ -383,12 +463,18 @@ def _setup_blacklist_commands(bot: commands.Bot):
             await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
             return
 
-        uid = str(usuario.id)
+        discord_id, usuario_obj, error = await _resolver_usuario(interaction, usuario)
+        if error:
+            await interaction.response.send_message(f"\u274c {error}", ephemeral=True)
+            return
+
+        uid = discord_id
         registro = db.obtener(uid)
+
         tiene_rol = False
-        if BLACKLIST_POSTULACIONES_ROLE_ID:
+        if isinstance(usuario_obj, discord.Member) and BLACKLIST_POSTULACIONES_ROLE_ID:
             rol = interaction.guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
-            if rol and rol in usuario.roles:
+            if rol and rol in usuario_obj.roles:
                 tiene_rol = True
 
         embed = discord.Embed(
@@ -412,7 +498,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                 estado += " \u26a0\ufe0f (sin rol - inconsistencia)"
             embed.add_field(name="Estado", value=estado, inline=False)
         else:
-            embed.description = f"{usuario.mention} **no** está en la blacklist de postulaciones."
+            embed.description = f"<@{uid}> **no** está en la blacklist de postulaciones."
             if tiene_rol:
                 embed.description += "\n\n\u26a0\ufe0f Sin embargo, tiene el rol de blacklist asignado (inconsistencia)."
 
