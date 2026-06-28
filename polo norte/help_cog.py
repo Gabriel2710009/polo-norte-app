@@ -8,6 +8,42 @@ logger = logging.getLogger("HelpCog")
 
 SECCIONES = [
     {
+        "titulo": "\u2705 /aprobar",
+        "descripcion": (
+            "Aprueba la postulación de un usuario.\n\n"
+            "Asigna los roles configurados en `/config_aprobar` y elimina "
+            "automáticamente los roles de postulación si el usuario los posee.\n\n"
+            "**Requiere:** Administrador, Gestionar Roles o rol autorizado."
+        ),
+    },
+    {
+        "titulo": "\u2699\ufe0f /config_aprobar",
+        "descripcion": (
+            "Abre un panel interactivo para configurar los roles del comando `/aprobar`.\n\n"
+            "Permite elegir mediante `RoleSelect` los roles que se otorgarán "
+            "y los que se eliminarán automáticamente al aprobar.\n\n"
+            "La configuración se guarda de forma persistente."
+        ),
+    },
+    {
+        "titulo": "\U0001f4dd /config_bienvenida",
+        "descripcion": (
+            "Abre un modal para editar el mensaje de bienvenida que luego "
+            "enviará `/bienvenida`.\n\n"
+            "El mensaje se guarda de forma persistente."
+        ),
+    },
+    {
+        "titulo": "\U0001f44b /bienvenida",
+        "descripcion": (
+            "Envía el mensaje de bienvenida configurado en `/config_bienvenida` "
+            "directamente en el canal actual.\n\n"
+            "**No se envía automáticamente al aprobar.** El entrevistador "
+            "decide cuándo ejecutarlo.\n\n"
+            "Acepta un usuario opcional para mencionarlo al inicio del mensaje."
+        ),
+    },
+    {
         "titulo": "\U0001f6ab /blacklist",
         "descripcion": (
             "Permite impedir que una persona vuelva a postularse.\n\n"

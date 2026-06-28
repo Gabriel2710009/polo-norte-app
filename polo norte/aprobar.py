@@ -2,19 +2,9 @@ import logging
 import discord
 from discord import app_commands
 import log_actions
+import config_manager
 
 logger = logging.getLogger("Aprobar")
-
-ROLES_A_ASIGNAR = [
-    1306126579482628106,
-    1306129853111599106,
-    1305968998206148760,
-    1307900695264890991,
-    1306131154360860674,
-    1335265463441162350,
-    1415042052051173516,
-    1410719738484494346,
-]
 
 CANAL_SOLICITUD_ID = 1363287550327783475
 ROL_AUTORIZADO_ID = 1307612928211554386
@@ -51,8 +41,9 @@ def _validar_jerarquia(guild: discord.Guild, roles: list[discord.Role]) -> tuple
 
 
 def _obtener_roles_faltantes(member: discord.Member) -> list[discord.Role]:
+    config = config_manager.load_aprobar_config()
     faltantes = []
-    for role_id in ROLES_A_ASIGNAR:
+    for role_id in config.get("roles_asignar", []):
         role = member.guild.get_role(role_id)
         if role is None:
             logger.warning("Rol %s no encontrado en el servidor", role_id)
@@ -60,6 +51,19 @@ def _obtener_roles_faltantes(member: discord.Member) -> list[discord.Role]:
         if role not in member.roles:
             faltantes.append(role)
     return faltantes
+
+
+def _obtener_roles_a_eliminar(member: discord.Member) -> list[discord.Role]:
+    config = config_manager.load_aprobar_config()
+    a_eliminar = []
+    for role_id in config.get("roles_eliminar", []):
+        role = member.guild.get_role(role_id)
+        if role is None:
+            logger.warning("Rol a eliminar %s no encontrado en el servidor", role_id)
+            continue
+        if role in member.roles:
+            a_eliminar.append(role)
+    return a_eliminar
 
 
 async def _asignar_roles(member: discord.Member, roles: list[discord.Role]) -> tuple[list[discord.Role], list[discord.Role]]:
@@ -78,26 +82,62 @@ async def _asignar_roles(member: discord.Member, roles: list[discord.Role]) -> t
     return asignados, errores
 
 
-async def _enviar_auditoria(member: discord.Member, admin: discord.Member, tipo_acceso: str, asignados: list[discord.Role], errores: list[discord.Role], bloqueados: list[discord.Role], canal: discord.TextChannel):
-    errores_reales = [r for r in errores if r is not None]
-    tiene_error = bool(errores_reales) or bool(bloqueados)
+async def _eliminar_roles(member: discord.Member, roles: list[discord.Role]) -> tuple[list[discord.Role], list[discord.Role]]:
+    eliminados = []
+    errores = []
+    for role in roles:
+        try:
+            await member.remove_roles(role, reason="Aprobación de postulación - limpieza")
+            eliminados.append(role)
+        except discord.Forbidden:
+            logger.error("Permisos insuficientes para eliminar %s a %s", role.id, member.id)
+            errores.append(role)
+        except Exception as e:
+            logger.error("Error eliminando rol %s a %s: %s", role.id, member.id, e)
+            errores.append(role)
+    return eliminados, errores
+
+
+async def _enviar_auditoria(
+    member: discord.Member,
+    admin: discord.Member,
+    tipo_acceso: str,
+    asignados: list[discord.Role],
+    eliminados: list[discord.Role],
+    errores_asignar: list[discord.Role],
+    errores_eliminar: list[discord.Role],
+    bloqueados: list[discord.Role],
+    canal: discord.TextChannel,
+):
+    tiene_error = bool(errores_asignar) or bool(errores_eliminar) or bool(bloqueados)
     estado = "✅ aprobado" if not tiene_error else "⚠️ aprobado con errores"
     color = discord.Color.green() if not tiene_error else discord.Color.orange()
-
-    roles_asignados = "\n".join(f"<@&{r.id}>" for r in asignados) or "Ninguno"
-    roles_error = "\n".join(f"<@&{r.id}>" for r in errores_reales) or "Ninguno"
-    roles_bloqueados = "\n".join(f"<@&{r.id}>" for r in bloqueados) or "Ninguno"
 
     embed = discord.Embed(title="📋 Aprobación de postulación", color=color, timestamp=discord.utils.utcnow())
     embed.add_field(name="👤 Usuario aprobado", value=f"{member.mention}\n`{member.id}`", inline=True)
     embed.add_field(name="🛠 Administrador", value=f"{admin.mention}\n`{admin.id}`", inline=True)
     embed.add_field(name="🔑 Acceso", value=tipo_acceso, inline=True)
     embed.add_field(name="📅 Fecha y hora", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M:%S UTC"), inline=False)
-    embed.add_field(name="✅ Roles asignados", value=roles_asignados, inline=False)
+
+    roles_asignados_str = "\n".join(f"<@&{r.id}>" for r in asignados) or "Ninguno"
+    embed.add_field(name="✅ Roles asignados", value=roles_asignados_str, inline=False)
+
+    if eliminados:
+        roles_eliminados_str = "\n".join(f"<@&{r.id}>" for r in eliminados)
+        embed.add_field(name="🗑️ Roles eliminados", value=roles_eliminados_str, inline=False)
+
     if bloqueados:
-        embed.add_field(name="⛔ Roles bloqueados (jerarquía)", value=roles_bloqueados, inline=False)
-    if errores_reales:
-        embed.add_field(name="❌ Roles con error", value=roles_error, inline=False)
+        roles_bloqueados_str = "\n".join(f"<@&{r.id}>" for r in bloqueados)
+        embed.add_field(name="⛔ Roles bloqueados (jerarquía)", value=roles_bloqueados_str, inline=False)
+
+    if errores_asignar:
+        errores_asignar_str = "\n".join(f"<@&{r.id}>" for r in errores_asignar)
+        embed.add_field(name="❌ Error al asignar", value=errores_asignar_str, inline=False)
+
+    if errores_eliminar:
+        errores_eliminar_str = "\n".join(f"<@&{r.id}>" for r in errores_eliminar)
+        embed.add_field(name="❌ Error al eliminar", value=errores_eliminar_str, inline=False)
+
     embed.add_field(name="📍 Canal", value=canal.mention, inline=True)
     embed.add_field(name="📌 Estado", value=estado, inline=True)
     embed.set_footer(text=f"ID: {member.id}")
@@ -165,10 +205,11 @@ async def aprobar(interaction: discord.Interaction, usuario: discord.Member):
     await interaction.response.defer(ephemeral=True)
 
     roles_faltantes = _obtener_roles_faltantes(usuario)
+    roles_a_eliminar = _obtener_roles_a_eliminar(usuario)
 
-    if not roles_faltantes:
+    if not roles_faltantes and not roles_a_eliminar:
         await interaction.followup.send(
-            f"ℹ️ {usuario.mention} ya tiene todos los roles asignados.",
+            f"ℹ️ {usuario.mention} ya tiene todos los roles asignados y no posee roles a eliminar.",
             ephemeral=True,
         )
         return
@@ -184,46 +225,60 @@ async def aprobar(interaction: discord.Interaction, usuario: discord.Member):
             ephemeral=True,
         )
 
-    if not roles_validos:
+    if not roles_validos and not roles_a_eliminar:
         await interaction.followup.send(
             "❌ No se puede asignar ningún rol por jerarquía. Revisá la posición del bot.",
             ephemeral=True,
         )
         return
 
-    asignados, errores = await _asignar_roles(usuario, roles_validos)
+    asignados, errores_asignar = await _asignar_roles(usuario, roles_validos)
+    eliminados, errores_eliminar = await _eliminar_roles(usuario, roles_a_eliminar)
 
     try:
         await _enviar_felicitaciones(canal, usuario)
     except Exception as e:
         logger.error("Error enviando felicitaciones: %s", e)
-        errores.append(None)
+        errores_asignar.append(None)
 
     tipo_acceso = _obtener_tipo_acceso(admin)
 
     try:
-        await _enviar_auditoria(usuario, admin, tipo_acceso, asignados, errores, roles_bloqueados, canal)
+        await _enviar_auditoria(
+            usuario, admin, tipo_acceso,
+            asignados, eliminados,
+            errores_asignar, errores_eliminar,
+            roles_bloqueados, canal,
+        )
     except Exception as e:
         logger.error("Error enviando auditoría: %s", e)
 
-    errores_reales = [r for r in errores if r is not None]
-    tiene_error = bool(errores_reales) or bool(roles_bloqueados)
+    errores_reales_asignar = [r for r in errores_asignar if r is not None]
+    errores_reales_eliminar = [r for r in errores_eliminar if r is not None]
+    tiene_error = bool(errores_reales_asignar) or bool(errores_reales_eliminar) or bool(roles_bloqueados)
 
     if not tiene_error:
-        await interaction.followup.send(
-            f"✅ {usuario.mention} fue aprobado correctamente.\n"
-            f"Roles asignados: {len(asignados)}",
-            ephemeral=True,
-        )
+        partes = [f"✅ {usuario.mention} fue aprobado correctamente."]
+        partes.append(f"Roles asignados: {len(asignados)}")
+        if eliminados:
+            partes.append(f"Roles eliminados: {len(eliminados)}")
+        await interaction.followup.send("\n".join(partes), ephemeral=True)
     else:
-        roles_ok = len(asignados)
-        partes = [f"⚠️ Aprobación completada con **{len(errores_reales) + len(roles_bloqueados)} error(es)**.\n✅ Asignados: {roles_ok}"]
+        partes = [
+            f"⚠️ Aprobación completada con errores.\n"
+            f"✅ Asignados: {len(asignados)}"
+        ]
+        if eliminados:
+            partes[0] += f" | 🗑️ Eliminados: {len(eliminados)}"
         if roles_bloqueados:
             ids_bloq = ", ".join(f"<@&{r.id}>" for r in roles_bloqueados)
             partes.append(f"⛔ Bloqueados por jerarquía: {ids_bloq}")
-        if errores_reales:
-            ids_err = ", ".join(f"<@&{r.id}>" for r in errores_reales)
+        if errores_reales_asignar:
+            ids_err = ", ".join(f"<@&{r.id}>" for r in errores_reales_asignar)
             partes.append(f"❌ Error al asignar: {ids_err}")
+        if errores_reales_eliminar:
+            ids_err = ", ".join(f"<@&{r.id}>" for r in errores_reales_eliminar)
+            partes.append(f"❌ Error al eliminar: {ids_err}")
         await interaction.followup.send("\n".join(partes), ephemeral=True)
 
 

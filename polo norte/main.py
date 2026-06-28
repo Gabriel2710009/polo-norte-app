@@ -12,6 +12,8 @@ from parser import parse_embed
 import fichaje
 import log_actions
 import aprobar
+import config_aprobar_cog
+import bienvenida_cog
 import blacklist_cog
 import help_cog
 
@@ -72,6 +74,8 @@ async def on_ready():
     blacklist_cog.BLACKLIST_ALLOW_ROLE_FALLBACK = BLACKLIST_ALLOW_ROLE_FALLBACK
     blacklist_cog.BLACKLIST_STAFF_ALERT_CHANNEL_ID = BLACKLIST_STAFF_ALERT_CHANNEL_ID
     blacklist_cog.BLACKLIST_STAFF_ALERT_ROLE_ID = BLACKLIST_STAFF_ALERT_ROLE_ID
+    await config_aprobar_cog.setup(bot)
+    await bienvenida_cog.setup(bot)
     await blacklist_cog.setup(bot)
     await help_cog.setup(bot)
 
