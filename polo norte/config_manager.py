@@ -99,3 +99,5 @@ def load_bienvenida_config():
 
 def save_bienvenida_config(config):
     return _save_json(BIENVENIDA_CONFIG_FILE, config)
+
+# Punto de despliegue
