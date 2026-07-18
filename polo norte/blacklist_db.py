@@ -29,6 +29,9 @@ def init():
             CREATE TABLE IF NOT EXISTS {_TABLE_BL} (
                 discord_id TEXT PRIMARY KEY,
                 nombre_ic TEXT NOT NULL DEFAULT 'Desconocido',
+                numero_ic TEXT,
+                iban_ic TEXT,
+                steam_url TEXT,
                 motivo TEXT NOT NULL,
                 staff_id TEXT NOT NULL,
                 fecha TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -36,6 +39,12 @@ def init():
                 expira_en TIMESTAMPTZ
             )
         """)
+        for col in ("numero_ic", "iban_ic", "steam_url"):
+            try:
+                cur.execute(f"ALTER TABLE {_TABLE_BL} ADD COLUMN IF NOT EXISTS {col} TEXT")
+            except Exception:
+                conn.rollback()
+                continue
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS {_TABLE_IN} (
                 id SERIAL PRIMARY KEY,
@@ -63,16 +72,17 @@ def init():
 
 
 def agregar(discord_id: str, nombre_ic: str, motivo: str, staff_id: str,
-            ticket_origen_id: str = None, expira_en: str = None):
+            ticket_origen_id: str = None, expira_en: str = None,
+            numero_ic: str = None, iban_ic: str = None, steam_url: str = None):
     if not nombre_ic:
         nombre_ic = "Desconocido"
     conn = _get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
-            f"INSERT INTO {_TABLE_BL} (discord_id, nombre_ic, motivo, staff_id, ticket_origen_id, expira_en) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (discord_id, nombre_ic, motivo, staff_id, ticket_origen_id, expira_en),
+            f"INSERT INTO {_TABLE_BL} (discord_id, nombre_ic, numero_ic, iban_ic, steam_url, motivo, staff_id, ticket_origen_id, expira_en) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (discord_id, nombre_ic, numero_ic, iban_ic, steam_url, motivo, staff_id, ticket_origen_id, expira_en),
         )
         conn.commit()
         logger.info("Blacklist creada: discord_id=%s", discord_id)

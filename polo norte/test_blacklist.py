@@ -227,6 +227,83 @@ class TestExtraerNombreIC(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────
+# Pruebas de extracción de datos IC completos
+# ─────────────────────────────────────────────
+
+class TestExtraerDatosIC(unittest.TestCase):
+    def test_extraer_todos_los_campos(self):
+        content = (
+            "Nombre IC: Fatido Rodriguez\n"
+            "Numero IC: 4809639162\n"
+            "IBAN IC: NA20 1821 8817 7121 6519\n"
+            "Steam URL: https://steamcommunity.com/profiles/76561199877636058/"
+        )
+        msgs = [_mensaje_mock(content)]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["nombre_ic"], "Fatido Rodriguez")
+        self.assertEqual(datos["numero_ic"], "4809639162")
+        self.assertEqual(datos["iban_ic"], "NA20 1821 8817 7121 6519")
+        self.assertEqual(datos["steam_url"], "https://steamcommunity.com/profiles/76561199877636058/")
+
+    def test_extraer_solo_nombre(self):
+        msgs = [_mensaje_mock("Nombre IC: Juan Perez\nOtro: cosa")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["nombre_ic"], "Juan Perez")
+        self.assertIsNone(datos["numero_ic"])
+        self.assertIsNone(datos["iban_ic"])
+        self.assertIsNone(datos["steam_url"])
+
+    def test_numero_con_variantes(self):
+        msgs = [_mensaje_mock("Número IC: 12345")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["numero_ic"], "12345")
+
+    def test_iban_con_variantes(self):
+        msgs = [_mensaje_mock("iban: NA20 1821")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["iban_ic"], "NA20 1821")
+
+    def test_steam_url_simple(self):
+        msgs = [_mensaje_mock("https://steamcommunity.com/profiles/123")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertIn("steam_url", datos)
+        self.assertIsNotNone(datos["steam_url"])
+
+    def test_error_ortografico_nombre(self):
+        msgs = [_mensaje_mock("nombre ic: Carlos Lopez")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["nombre_ic"], "Carlos Lopez")
+
+    def test_error_ortografico_numero(self):
+        msgs = [_mensaje_mock("num IC: 98765")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["numero_ic"], "98765")
+
+    def test_error_ortografico_iban(self):
+        msgs = [_mensaje_mock("cuenta ic: ES1234")]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["iban_ic"], "ES1234")
+
+    def test_campos_con_flecha(self):
+        content = "→ Nombre IC: Ana Garcia\n→ Numero: 555\n→ Steam: https://steamcommunity.com/id/ana"
+        msgs = [_mensaje_mock(content)]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["nombre_ic"], "Ana Garcia")
+        self.assertEqual(datos["numero_ic"], "555")
+
+    def test_campos_desde_embed(self):
+        fields = [
+            _field_mock("Nombre IC", "Pedro Martinez"),
+            _field_mock("Número IC", "111222"),
+        ]
+        embed = _embed_mock(fields=fields)
+        msgs = [_mensaje_mock("", embeds=[embed])]
+        datos = blacklist_cog._extraer_datos_ic(msgs)
+        self.assertEqual(datos["nombre_ic"], "Pedro Martinez")
+        self.assertEqual(datos["numero_ic"], "111222")
+
+
+# ─────────────────────────────────────────────
 # Pruebas de resolución de usuario (regex)
 # ─────────────────────────────────────────────
 

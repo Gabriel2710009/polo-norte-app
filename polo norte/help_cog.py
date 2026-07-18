@@ -46,8 +46,13 @@ SECCIONES = [
     {
         "titulo": "\U0001f6ab /blacklist",
         "descripcion": (
-            "Permite impedir que una persona vuelva a postularse.\n\n"
-            "Acepta mención (@Usuario) o Discord ID como identificador.\n\n"
+            "Impide que una persona vuelva a postularse.\n\n"
+            "Acepta mención (@Usuario) o Discord ID.\n\n"
+            "**Datos IC:** El bot busca automáticamente el Nombre IC "
+            "en los mensajes fijados del canal actual. Si no lo encuentra, "
+            "te mostrará un formulario para completar los datos "
+            "(Nombre IC, Número IC, IBAN IC, Steam URL) "
+            "o un botón \"Desconozco\" si no los tienes.\n\n"
             "**Ejemplo:**\n"
             "Si un usuario insulta entrevistadores o incumple normas "
             "durante una entrevista, puedes añadirlo a la blacklist."

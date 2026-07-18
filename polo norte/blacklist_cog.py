@@ -73,41 +73,72 @@ def _detectar_inconsistencia(en_db: bool, tiene_rol: bool) -> bool:
     return (en_db and not tiene_rol) or (not en_db and tiene_rol)
 
 
-# ── Extracción de Nombre IC ──────────────
+# ── Extracción de Datos IC ──────────────
 
-def _extraer_nombre_ic(mensajes: list[discord.Message]) -> str:
-    patrones = [
-        re.compile(r"(?:→\s*)?nombre\s*ic\s*:?\s*(.+)", re.IGNORECASE),
-        re.compile(r"(?:→\s*)?nombre\s*ic\s*:?\s*\n\s*(.+)", re.IGNORECASE),
-    ]
+_PATRONES_NOMBRE_IC = [
+    re.compile(r"(?:→\s*)?nombre\s*(?:ic)?\s*:?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:→\s*)?nombre\s*(?:ic)?\s*:?\s*\n\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:→\s*)?nombre\s*(?:ic)?\s*:?\s*\n\s*\n\s*(.+)", re.IGNORECASE),
+]
 
+_PATRONES_NUMERO_IC = [
+    re.compile(r"(?:→\s*)?(?:n[úu]mero|num|nro|tel[eé]fono|cel|celular)\s*(?:ic)?\s*:?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:→\s*)?(?:n[úu]mero|num|nro|tel[eé]fono|cel|celular)\s*(?:ic)?\s*:?\s*\n\s*(.+)", re.IGNORECASE),
+]
+
+_PATRONES_IBAN_IC = [
+    re.compile(r"(?:→\s*)?(?:iban|cuenta|bank|banco|ibam|bban)\s*(?:ic)?\s*:?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:→\s*)?(?:iban|cuenta|bank|banco|ibam|bban)\s*(?:ic)?\s*:?\s*\n\s*(.+)", re.IGNORECASE),
+]
+
+_PATRONES_STEAM = [
+    re.compile(r"(?:→\s*)?(?:steam\s*(?:url|nombre|name|id)?|url\s*steam)\s*:?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:→\s*)?(?:steam\s*(?:url|nombre|name|id)?|url\s*steam)\s*:?\s*\n\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:https?://)?steamcommunity\.com/\S+", re.IGNORECASE),
+]
+
+
+def _extraer_campo_ic(mensajes: list[discord.Message], patrones: list[re.Pattern]) -> str | None:
     for msg in mensajes:
         for patron in patrones:
             m = patron.search(msg.content)
             if m:
-                return m.group(1).strip()
+                val = m.group(0) if "steamcommunity" in patron.pattern else m.group(1).strip()
+                if val:
+                    return val.strip()
 
     for msg in mensajes:
         for embed in msg.embeds:
-            for field in embed.fields:
-                for patron in patrones:
-                    m = patron.search(field.name + "\n" + (field.value or ""))
-                    if m:
-                        return m.group(1).strip()
+            text = f"{embed.title or ''}\n{embed.description or ''}"
             for patron in patrones:
-                m = patron.search((embed.description or "") + "\n" + (embed.title or ""))
+                m = patron.search(text)
                 if m:
-                    return m.group(1).strip()
-
-    for msg in mensajes:
-        for embed in msg.embeds:
-            for field in embed.fields:
-                if "nombre" in field.name.lower() and "ic" in field.name.lower():
-                    val = (field.value or "").strip()
+                    val = m.group(0) if "steamcommunity" in patron.pattern else m.group(1).strip()
                     if val:
-                        return val
+                        return val.strip()
+            for field in embed.fields:
+                combined = field.name + "\n" + (field.value or "")
+                for patron in patrones:
+                    m = patron.search(combined)
+                    if m:
+                        val = m.group(0) if "steamcommunity" in patron.pattern else m.group(1).strip()
+                        if val:
+                            return val.strip()
 
     return None
+
+
+def _extraer_nombre_ic(mensajes: list[discord.Message]) -> str | None:
+    return _extraer_campo_ic(mensajes, _PATRONES_NOMBRE_IC)
+
+
+def _extraer_datos_ic(mensajes: list[discord.Message]) -> dict:
+    return {
+        "nombre_ic": _extraer_campo_ic(mensajes, _PATRONES_NOMBRE_IC),
+        "numero_ic": _extraer_campo_ic(mensajes, _PATRONES_NUMERO_IC),
+        "iban_ic": _extraer_campo_ic(mensajes, _PATRONES_IBAN_IC),
+        "steam_url": _extraer_campo_ic(mensajes, _PATRONES_STEAM),
+    }
 
 
 async def _obtener_mensajes_ticket(channel: discord.TextChannel, limite: int = 50) -> list[discord.Message]:
@@ -163,6 +194,264 @@ async def _enviar_embed_log(bot: commands.Bot, embed: discord.Embed):
             "\U0001f6ab Error enviando embed blacklist",
             f"No se pudo enviar embed a <#{BLACKLIST_LOG_CHANNEL_ID}>: `{e}`",
         )
+
+
+# ── IC Modal / View ───────────────────────
+
+class ICModal(discord.ui.Modal, title="Información IC del usuario"):
+    nombre_ic = discord.ui.TextInput(
+        label="Nombre IC",
+        placeholder="Fatido Rodriguez",
+        max_length=100,
+        required=True,
+    )
+    numero_ic = discord.ui.TextInput(
+        label="Número IC",
+        placeholder="4809639162",
+        max_length=50,
+        required=False,
+    )
+    iban_ic = discord.ui.TextInput(
+        label="IBAN IC (cuenta bancaria)",
+        placeholder="NA20 1821 8817 7121 6519",
+        max_length=50,
+        required=False,
+    )
+    steam_url = discord.ui.TextInput(
+        label="Steam URL / Nombre",
+        placeholder="https://steamcommunity.com/profiles/76561199877636058/",
+        max_length=200,
+        required=False,
+    )
+
+    def __init__(self, ctx: dict):
+        super().__init__()
+        self.ctx = ctx
+
+    async def on_submit(self, interaction: discord.Interaction):
+        nombre_ic = self.nombre_ic.value.strip()
+        if not nombre_ic:
+            await interaction.response.send_message("❌ El nombre IC es obligatorio.", ephemeral=True)
+            return
+        numero_ic = self.numero_ic.value.strip() or None
+        iban_ic = self.iban_ic.value.strip() or None
+        steam_url = self.steam_url.value.strip() or None
+
+        await interaction.response.defer(ephemeral=True)
+        await _ejecutar_blacklist(
+            interaction=interaction,
+            uid=self.ctx["uid"],
+            usuario_obj=self.ctx["usuario_obj"],
+            motivo=self.ctx["motivo"],
+            nombre_ic=nombre_ic,
+            numero_ic=numero_ic,
+            iban_ic=iban_ic,
+            steam_url=steam_url,
+        )
+
+
+class ICView(discord.ui.View):
+    def __init__(self, ctx: dict):
+        super().__init__(timeout=300)
+        self.ctx = ctx
+
+    @discord.ui.button(label="📝 Completar IC", style=discord.ButtonStyle.primary)
+    async def completar_ic(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.ctx["staff_id"]:
+            await interaction.response.send_message("❌ Solo quien ejecutó el comando puede completar el IC.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ICModal(self.ctx))
+
+    @discord.ui.button(label="❌ Desconozco", style=discord.ButtonStyle.secondary)
+    async def desconozco(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.ctx["staff_id"]:
+            await interaction.response.send_message("❌ Solo quien ejecutó el comando puede hacer esto.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _ejecutar_blacklist(
+            interaction=interaction,
+            uid=self.ctx["uid"],
+            usuario_obj=self.ctx["usuario_obj"],
+            motivo=self.ctx["motivo"],
+            nombre_ic="Desconocido",
+        )
+
+
+# ── Blacklist execution ──────────────────
+
+async def _ejecutar_blacklist(
+    interaction: discord.Interaction,
+    uid: str,
+    usuario_obj,
+    motivo: str,
+    nombre_ic: str,
+    ticket_origen_id: str = None,
+    numero_ic: str = None,
+    iban_ic: str = None,
+    steam_url: str = None,
+):
+    """Crea la blacklist en DB, asigna rol y envía embeds."""
+    bot = interaction.client
+    guild = interaction.guild
+
+    ticket_origen_encontrado = ticket_origen_id
+    if not ticket_origen_encontrado:
+        categoria = guild.get_channel(POSTULACIONES_CATEGORY_ID)
+        if categoria:
+            for channel in categoria.channels:
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+                try:
+                    permisos = channel.permissions_for(usuario_obj)
+                except Exception:
+                    continue
+                if not (permisos.read_messages and permisos.send_messages):
+                    continue
+                mensajes = await _obtener_mensajes_ticket(channel, limite=30)
+                extraido = _extraer_nombre_ic(mensajes)
+                if extraido:
+                    ticket_origen_encontrado = str(channel.id)
+                    break
+
+    creado = db.agregar(
+        discord_id=uid,
+        nombre_ic=nombre_ic,
+        motivo=motivo,
+        staff_id=str(interaction.user.id),
+        ticket_origen_id=ticket_origen_encontrado,
+        numero_ic=numero_ic,
+        iban_ic=iban_ic,
+        steam_url=steam_url,
+    )
+
+    if not creado:
+        await interaction.followup.send(
+            "\u274c Error inesperado al crear la blacklist (posible duplicado).", ephemeral=True,
+        )
+        return
+
+    es_member = isinstance(usuario_obj, discord.Member)
+    rol_ok = True
+    if es_member and BLACKLIST_POSTULACIONES_ROLE_ID:
+        rol = guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
+        if rol:
+            try:
+                await usuario_obj.add_roles(rol, reason="Blacklist de postulaciones")
+            except Exception as e:
+                rol_ok = False
+                logger.error("No se pudo asignar rol de blacklist a %s: %s", uid, e)
+                await log_actions.log_error(
+                    "\U0001f6ab Error asignando rol blacklist",
+                    f"Usuario: <@{uid}>\nRol: <@&{BLACKLIST_POSTULACIONES_ROLE_ID}>\nError: `{e}`",
+                )
+
+    embed = discord.Embed(
+        title="\U0001f6ab Blacklist de Postulaciones",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Nombre IC", value=nombre_ic, inline=True)
+    if numero_ic:
+        embed.add_field(name="Número IC", value=numero_ic, inline=True)
+    if iban_ic:
+        embed.add_field(name="IBAN IC", value=iban_ic, inline=True)
+    if steam_url:
+        embed.add_field(name="Steam", value=steam_url, inline=False)
+    embed.add_field(name="Discord", value=f"<@{uid}>\n`{uid}`", inline=False)
+    embed.add_field(name="Motivo", value=motivo, inline=False)
+    embed.add_field(name="Aplicada por", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
+    embed.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
+    if ticket_origen_encontrado:
+        embed.add_field(name="Ticket origen", value=f"<#{ticket_origen_encontrado}>", inline=True)
+    if not rol_ok:
+        embed.add_field(name="\u26a0\ufe0f Rol", value="No se pudo asignar (revisar jerarquía).", inline=False)
+    elif not es_member:
+        embed.add_field(name="\u2139\ufe0f Rol", value="Usuario no está en el servidor. Solo se registró en DB.", inline=False)
+    embed.set_footer(text=f"ID: {uid}")
+
+    await _enviar_embed_log(bot, embed)
+
+    log_actions.log_info(
+        "\U0001f6ab Blacklist aplicada",
+        f"**Usuario:** <@{uid}> (`{uid}`)\n"
+        f"**Nombre IC:** {nombre_ic}\n"
+        f"**Motivo:** {motivo}\n"
+        f"**Staff:** {interaction.user} (`{interaction.user.id}`)",
+    )
+
+    if not es_member:
+        await interaction.followup.send(
+            "\u2705 Blacklist aplicada en DB. El usuario no está en el servidor, no se asignó rol.",
+            ephemeral=True,
+        )
+    elif rol_ok:
+        await interaction.followup.send("\u2705 Blacklist aplicada correctamente.", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            "\u26a0\ufe0f Blacklist aplicada en DB, pero **no se pudo asignar el rol**."
+            " Revisá la jerarquía del bot.",
+            ephemeral=True,
+        )
+
+
+# ── Eliminar mensajes de blacklist ────────
+
+async def _borrar_mensajes_blacklist(bot, guild: discord.Guild, uid: str, ticket_origen_id: str = None):
+    """Busca y elimina mensajes de notificación de blacklist en tickets y logs."""
+    eliminados = 0
+
+    # 1. Ticket origen
+    if ticket_origen_id:
+        channel = bot.get_channel(int(ticket_origen_id))
+        if channel and isinstance(channel, discord.TextChannel):
+            try:
+                async for msg in channel.history(limit=100):
+                    if msg.author.id == bot.user.id and msg.embeds:
+                        for embed in msg.embeds:
+                            titulo = (embed.title or "") + (embed.description or "")
+                            if "\U0001f6ab" in titulo and "bloqueada" in titulo.lower():
+                                await msg.delete()
+                                eliminados += 1
+                                break
+            except Exception as e:
+                logger.warning("Error borrando mensajes en ticket %s: %s", channel.id, e)
+
+    # 2. Log channel
+    log_channel = bot.get_channel(BLACKLIST_LOG_CHANNEL_ID)
+    if log_channel and isinstance(log_channel, discord.TextChannel):
+        try:
+            async for msg in log_channel.history(limit=200):
+                if msg.author.id == bot.user.id and msg.embeds:
+                    for embed in msg.embeds:
+                        if embed.footer and embed.footer.text and uid in embed.footer.text:
+                            await msg.delete()
+                            eliminados += 1
+                            break
+        except Exception as e:
+            logger.warning("Error borrando mensajes en log %s: %s", log_channel.id, e)
+
+    # 3. Canales de la categoría de postulaciones
+    categoria = guild.get_channel(POSTULACIONES_CATEGORY_ID)
+    if categoria:
+        for channel in categoria.channels:
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            if ticket_origen_id and str(channel.id) == ticket_origen_id:
+                continue
+            try:
+                async for msg in channel.history(limit=50):
+                    if msg.author.id == bot.user.id and msg.embeds:
+                        for embed in msg.embeds:
+                            titulo = (embed.title or "") + (embed.description or "")
+                            if "\U0001f6ab" in titulo and "bloqueada" in titulo.lower():
+                                await msg.delete()
+                                eliminados += 1
+                                break
+            except Exception:
+                continue
+
+    if eliminados:
+        logger.info("Mensajes de blacklist eliminados: %s para UID %s", eliminados, uid)
 
 
 # ── Resolución de usuario ─────────────────
@@ -265,111 +554,72 @@ def _setup_blacklist_commands(bot: commands.Bot):
             embed.add_field(name="Fecha", value=existente["fecha"], inline=True)
             if existente.get("ticket_origen_id"):
                 embed.add_field(name="Ticket origen", value=f"<#{existente['ticket_origen_id']}>", inline=True)
+            if existente.get("numero_ic"):
+                embed.add_field(name="Número IC", value=existente["numero_ic"], inline=True)
+            if existente.get("iban_ic"):
+                embed.add_field(name="IBAN IC", value=existente["iban_ic"], inline=True)
+            if existente.get("steam_url"):
+                embed.add_field(name="Steam", value=existente["steam_url"], inline=False)
             embed.set_footer(text="Usá /unblacklist para remover o /blacklist-info para detalles")
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
-
-        nombre_ic = "Desconocido"
+        # ── Intentar extraer IC del canal actual ──
+        nombre_ic = None
         ticket_origen_id = None
+        datos_ic = {}
 
-        categoria = interaction.guild.get_channel(POSTULACIONES_CATEGORY_ID)
-        if categoria:
-            for channel in categoria.channels:
-                if not isinstance(channel, discord.TextChannel):
-                    continue
-                canal_ticket: discord.TextChannel = channel
-                try:
-                    permisos = canal_ticket.permissions_for(usuario_obj)
-                except Exception:
-                    continue
-                if not (permisos.read_messages and permisos.send_messages):
-                    continue
+        canal_actual = interaction.channel
+        if isinstance(canal_actual, discord.TextChannel):
+            try:
+                pinned = await canal_actual.pins()
+                datos_ic = _extraer_datos_ic(pinned)
+                nombre_ic = datos_ic.get("nombre_ic")
+            except Exception as e:
+                logger.warning("Error revisando pinned en canal actual: %s", e)
 
-                mensajes = await _obtener_mensajes_ticket(canal_ticket, limite=30)
-                extraido = _extraer_nombre_ic(mensajes)
-                if extraido:
-                    nombre_ic = extraido
-                    ticket_origen_id = str(canal_ticket.id)
-                    break
+            if not nombre_ic:
+                mensajes = await _obtener_mensajes_ticket(canal_actual, limite=30)
+                datos_ic = _extraer_datos_ic(mensajes)
+                nombre_ic = datos_ic.get("nombre_ic")
 
-        creado = db.agregar(
-            discord_id=uid,
-            nombre_ic=nombre_ic,
-            motivo=motivo,
-            staff_id=str(interaction.user.id),
-            ticket_origen_id=ticket_origen_id,
-        )
+            if nombre_ic:
+                ticket_origen_id = str(canal_actual.id)
 
-        if not creado:
-            await interaction.followup.send(
-                "\u274c Error inesperado al crear la blacklist (posible duplicado).", ephemeral=True,
+        if nombre_ic:
+            await interaction.response.defer(ephemeral=True)
+            await _ejecutar_blacklist(
+                interaction=interaction,
+                uid=uid,
+                usuario_obj=usuario_obj,
+                motivo=motivo,
+                nombre_ic=nombre_ic,
+                ticket_origen_id=ticket_origen_id,
+                numero_ic=datos_ic.get("numero_ic"),
+                iban_ic=datos_ic.get("iban_ic"),
+                steam_url=datos_ic.get("steam_url"),
             )
             return
 
-        es_member = isinstance(usuario_obj, discord.Member)
-        rol_ok = True
-        if es_member and BLACKLIST_POSTULACIONES_ROLE_ID:
-            rol = interaction.guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
-            if rol:
-                try:
-                    await usuario_obj.add_roles(rol, reason="Blacklist de postulaciones")
-                except Exception as e:
-                    rol_ok = False
-                    logger.error("No se pudo asignar rol de blacklist a %s: %s", uid, e)
-                    await log_actions.log_error(
-                        "\U0001f6ab Error asignando rol blacklist",
-                        f"Usuario: <@{uid}>\nRol: <@&{BLACKLIST_POSTULACIONES_ROLE_ID}>\nError: `{e}`",
-                    )
-
-        if nombre_ic == "Desconocido":
-            await interaction.followup.send(
-                "\u26a0\ufe0f No se pudo extraer automáticamente el Nombre IC. Se registrará como **Desconocido**.",
-                ephemeral=True,
-            )
-
-        embed = discord.Embed(
-            title="\U0001f6ab Blacklist de Postulaciones",
-            color=discord.Color.red(),
-            timestamp=discord.utils.utcnow(),
+        # ── No se encontró IC ── preguntar al staff ──
+        ctx = {
+            "uid": uid,
+            "usuario_obj": usuario_obj,
+            "motivo": motivo,
+            "staff_id": interaction.user.id,
+        }
+        view = ICView(ctx)
+        await interaction.response.send_message(
+            "\u2139\ufe0f No se encontró información IC automáticamente.\n\n"
+            "Podés **completar los datos IC** manualmente o indicar que **desconocés** el nombre IC.\n\n"
+            "Formato esperado:\n"
+            "• **Nombre IC** (obligatorio)\n"
+            "• Número IC\n"
+            "• IBAN IC (cuenta bancaria)\n"
+            "• Steam URL / Nombre",
+            view=view,
+            ephemeral=True,
         )
-        embed.add_field(name="Nombre IC", value=nombre_ic, inline=True)
-        embed.add_field(name="Discord", value=f"<@{uid}>\n`{uid}`", inline=False)
-        embed.add_field(name="Motivo", value=motivo, inline=False)
-        embed.add_field(name="Aplicada por", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
-        embed.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
-        if ticket_origen_id:
-            embed.add_field(name="Ticket origen", value=f"<#{ticket_origen_id}>", inline=True)
-        if not rol_ok:
-            embed.add_field(name="\u26a0\ufe0f Rol", value="No se pudo asignar (revisar jerarquía).", inline=False)
-        elif not es_member:
-            embed.add_field(name="\u2139\ufe0f Rol", value="Usuario no está en el servidor. Solo se registró en DB.", inline=False)
-        embed.set_footer(text=f"ID: {uid}")
-
-        await _enviar_embed_log(bot, embed)
-
-        log_actions.log_info(
-            "\U0001f6ab Blacklist aplicada",
-            f"**Usuario:** <@{uid}> (`{uid}`)\n"
-            f"**Nombre IC:** {nombre_ic}\n"
-            f"**Motivo:** {motivo}\n"
-            f"**Staff:** {interaction.user} (`{interaction.user.id}`)",
-        )
-
-        if not es_member:
-            await interaction.followup.send(
-                "\u2705 Blacklist aplicada en DB. El usuario no está en el servidor, no se asignó rol.",
-                ephemeral=True,
-            )
-        elif rol_ok:
-            await interaction.followup.send("\u2705 Blacklist aplicada correctamente.", ephemeral=True)
-        else:
-            await interaction.followup.send(
-                "\u26a0\ufe0f Blacklist aplicada en DB, pero **no se pudo asignar el rol**."
-                " Revisá la jerarquía del bot.",
-                ephemeral=True,
-            )
 
     # ── /unblacklist ────────────────────────
 
@@ -448,6 +698,10 @@ def _setup_blacklist_commands(bot: commands.Bot):
             f"**Staff:** {interaction.user} (`{interaction.user.id}`)",
         )
 
+        # ── Borrar mensajes de blacklist ──
+        ticket_origen = (registro_previo or {}).get("ticket_origen_id")
+        await _borrar_mensajes_blacklist(bot, interaction.guild, uid, ticket_origen)
+
         await interaction.followup.send(f"\u2705 <@{uid}> procesado.", ephemeral=True)
 
     # ── /blacklist-info ─────────────────────
@@ -485,6 +739,12 @@ def _setup_blacklist_commands(bot: commands.Bot):
 
         if registro:
             embed.add_field(name="Nombre IC", value=registro["nombre_ic"], inline=True)
+            if registro.get("numero_ic"):
+                embed.add_field(name="Número IC", value=registro["numero_ic"], inline=True)
+            if registro.get("iban_ic"):
+                embed.add_field(name="IBAN IC", value=registro["iban_ic"], inline=True)
+            if registro.get("steam_url"):
+                embed.add_field(name="Steam", value=registro["steam_url"], inline=False)
             embed.add_field(name="Discord ID", value=f"`{registro['discord_id']}`", inline=True)
             embed.add_field(name="Motivo", value=registro["motivo"], inline=False)
             embed.add_field(name="Staff", value=f"<@{registro['staff_id']}>", inline=True)
@@ -596,6 +856,12 @@ def _setup_blacklist_commands(bot: commands.Bot):
                     timestamp=discord.utils.utcnow(),
                 )
                 embed.add_field(name="Nombre IC", value=r["nombre_ic"], inline=True)
+                if r.get("numero_ic"):
+                    embed.add_field(name="Número IC", value=r["numero_ic"], inline=True)
+                if r.get("iban_ic"):
+                    embed.add_field(name="IBAN IC", value=r["iban_ic"], inline=True)
+                if r.get("steam_url"):
+                    embed.add_field(name="Steam", value=r["steam_url"], inline=False)
                 embed.add_field(name="Discord ID", value=f"`{r['discord_id']}`", inline=True)
                 embed.add_field(name="Motivo", value=r["motivo"], inline=False)
                 embed.add_field(name="Staff", value=f"<@{r['staff_id']}>", inline=True)
