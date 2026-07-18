@@ -1204,6 +1204,51 @@ def _setup_ticket_event(bot: commands.Bot):
     bot.add_listener(wrapper, "on_guild_channel_create")
 
 
+async def _on_member_join(member: discord.Member, bot: commands.Bot):
+    """Asigna el rol de blacklist automáticamente si el miembro está en la DB."""
+    if member.bot:
+        return
+    if BLACKLIST_POSTULACIONES_ROLE_ID == 0:
+        return
+
+    try:
+        registro = db.obtener(str(member.id))
+        if not registro:
+            return
+    except Exception as e:
+        logger.warning("Error consultando blacklist en on_member_join para %s: %s", member.id, e)
+        return
+
+    rol = member.guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
+    if not rol:
+        logger.warning("BLACKLIST_POSTULACIONES_ROLE_ID %s no encontrado en on_member_join", BLACKLIST_POSTULACIONES_ROLE_ID)
+        return
+
+    if rol in member.roles:
+        return
+
+    try:
+        await member.add_roles(rol, reason="Blacklist activa en DB · reingreso al servidor")
+        logger.info("Rol de blacklist asignado automáticamente a %s (%s) por reingreso", member, member.id)
+        log_actions.log_info(
+            "\U0001f6ab Rol blacklist asignado por reingreso",
+            f"**Usuario:** {member.mention} (`{member.id}`)\n"
+            f"**Nombre IC:** {registro.get('nombre_ic', 'Desconocido')}",
+        )
+    except Exception as e:
+        logger.error("No se pudo asignar rol de blacklist a %s por reingreso: %s", member.id, e)
+        await log_actions.log_error(
+            "\U0001f6ab Error asignando rol blacklist por reingreso",
+            f"Usuario: <@{member.id}>\nRol: <@&{BLACKLIST_POSTULACIONES_ROLE_ID}>\nError: `{e}`",
+        )
+
+
+def _setup_member_join_event(bot: commands.Bot):
+    async def wrapper(member):
+        await _on_member_join(member, bot)
+    bot.add_listener(wrapper, "on_member_join")
+
+
 class BlacklistCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1213,4 +1258,5 @@ async def setup(bot: commands.Bot):
     db.init()
     _setup_blacklist_commands(bot)
     _setup_ticket_event(bot)
+    _setup_member_join_event(bot)
     logger.info("Módulo de blacklist de postulaciones cargado")
