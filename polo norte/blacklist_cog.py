@@ -1,5 +1,8 @@
 import re
+import os
+import json
 import logging
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -41,12 +44,42 @@ BLACKLIST_STAFF_ALERT_ROLE_ID = 0
 ROL_AUTORIZADO_ID = 1307612928211554386
 
 # Protección contra spam: canales ya notificados en esta sesión
-# Riesgo aceptado: tras reinicio del bot, _tickets_notificados se limpia.
-# Si un ticket previo sigue abierto cuando el bot reinicia y el evento
-# on_guild_channel_create NO se vuelve a disparar (el canal ya existe),
-# no hay duplicado. El riesgo es solo si el bot procesa el evento después
-# de reiniciar, pero canales nuevos se crean mientras el bot está vivo.
+# Persistido a disco para sobrevivir reinicios.
+# Cargado al iniciar desde data/tickets_notificados.json y
+# guardado cada vez que se notifica un nuevo ticket.
 _tickets_notificados: set[int] = set()
+
+logger_scanner = logging.getLogger("BlacklistScanner")
+
+_NOTIFICADOS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
+)
+_NOTIFICADOS_FILE = os.path.join(_NOTIFICADOS_DIR, "tickets_notificados.json")
+
+
+def _persistir_notificados():
+    try:
+        os.makedirs(_NOTIFICADOS_DIR, exist_ok=True)
+        with open(_NOTIFICADOS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(_tickets_notificados), f)
+    except Exception as e:
+        logger.warning("Error persistiendo notificados: %s", e)
+
+
+def _cargar_notificados():
+    try:
+        if not os.path.exists(_NOTIFICADOS_FILE):
+            logger_scanner.info("No hay registro persistente de notificados previos")
+            return
+        with open(_NOTIFICADOS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _tickets_notificados.update(int(x) for x in data)
+        logger_scanner.info(
+            "Notificados persistentes cargados: %s tickets (evitará duplicados)",
+            len(_tickets_notificados),
+        )
+    except Exception as e:
+        logger.warning("Error cargando notificados persistentes: %s", e)
 
 # ── Permisos ──────────────────────────────
 
@@ -1055,59 +1088,109 @@ def _identificar_creador(
     return candidatos[0].id
 
 
-async def _on_guild_channel_create(channel: discord.abc.GuildChannel, bot: commands.Bot):
-    # ── Filtros rápidos de descarte ────────
+# ── Función centralizada de verificación ──
+
+async def check_ticket_blacklist(
+    channel: discord.TextChannel,
+    bot: commands.Bot,
+    origen: str = "desconocido",
+) -> bool:
+    """
+    Función centralizada que recibe un canal de ticket, identifica
+    al creador, consulta la blacklist y notifica si corresponde.
+
+    Args:
+        channel: Canal de ticket a verificar.
+        bot:     Instancia del bot.
+        origen:  Identificador textual del caller (logs).
+
+    Returns:
+        True si se notificó al usuario (estaba en blacklist).
+        False en cualquier otro caso (no aplica, ya notificado, error, etc.).
+    """
     if POSTULACIONES_CATEGORY_ID == 0:
-        return
+        logger_scanner.debug("[%s] POSTULACIONES_CATEGORY_ID no configurado", origen)
+        return False
     if channel.category_id != POSTULACIONES_CATEGORY_ID:
-        return
+        logger_scanner.debug(
+            "[%s] Canal %s no está en categoría postulaciones (cat=%s)",
+            origen, channel.id, channel.category_id,
+        )
+        return False
     if not isinstance(channel, discord.TextChannel):
-        return
+        logger_scanner.debug("[%s] Canal %s no es TextChannel", origen, channel.id)
+        return False
+    if channel.id in _tickets_notificados:
+        logger_scanner.debug("[%s] Ticket %s ya notificado previamente", origen, channel.id)
+        return False
 
-    canal: discord.TextChannel = channel
+    logger_scanner.info("[%s] Verificando ticket %s", origen, channel.id)
 
-    # Protección spam en memoria (ver §3 en análisis)
-    if canal.id in _tickets_notificados:
-        return
-    _tickets_notificados.add(canal.id)
-
-    # ── Identificar creador del ticket ────
-    usuario_id = _identificar_creador(canal, bot)
+    # ── Identificar creador ─────────────────
+    usuario_id = _identificar_creador(channel, bot)
 
     if not usuario_id:
+        logger_scanner.debug("[%s] Sin creador por overwrites, revisando historial", origen)
         try:
-            async for msg in canal.history(limit=5, oldest_first=True):
+            async for msg in channel.history(limit=5, oldest_first=True):
                 if msg.author.id != bot.user.id:
                     usuario_id = msg.author.id
+                    logger_scanner.debug("[%s] Creador inferido del historial: %s", origen, usuario_id)
                     break
         except Exception:
             pass
 
+    # Fallback 3: audit log (cuando Ticket Tool no expone owner ni overwrites)
     if not usuario_id:
-        return
+        logger_scanner.debug("[%s] Sin creador por historial, consultando audit log", origen)
+        try:
+            async for entry in channel.guild.audit_logs(
+                action=discord.AuditLogAction.channel_create,
+                limit=5,
+            ):
+                if entry.target.id == channel.id:
+                    usuario_id = entry.user.id
+                    logger_scanner.debug("[%s] Creador inferido del audit log: %s", origen, usuario_id)
+                    break
+        except discord.Forbidden:
+            logger_scanner.debug("[%s] Sin permiso para audit log en guild %s", origen, channel.guild.id)
+        except Exception as e:
+            logger_scanner.debug("[%s] Error en audit log para %s: %s", origen, channel.id, e)
 
-    guild = canal.guild
+    if not usuario_id:
+        logger_scanner.info("[%s] No se pudo identificar creador del ticket %s", origen, channel.id)
+        return False
+
+    # ── Resolver Member ─────────────────────
+    guild = channel.guild
     miembro = guild.get_member(usuario_id)
     if not miembro:
         try:
             miembro = await guild.fetch_member(usuario_id)
+            logger_scanner.debug("[%s] Miembro obtenido via fetch: %s", origen, usuario_id)
         except Exception:
-            return
+            logger_scanner.warning(
+                "[%s] No se pudo resolver miembro %s para ticket %s",
+                origen, usuario_id, channel.id,
+            )
+            return False
 
     if not miembro:
-        return
+        logger_scanner.warning("[%s] Miembro %s es None tras fetch", origen, usuario_id)
+        return False
 
-    # ── Bypass: staff / roles excluidos (Punto 1) ──
+    # ── Bypass staff ────────────────────────
     if _es_staff(miembro):
+        logger_scanner.info("[%s] Usuario %s es staff/bypass, omitiendo", origen, usuario_id)
         log_actions.log_info(
             "\u2139\ufe0f Blacklist: usuario ignorado por bypass",
             f"**Usuario:** {miembro} (`{usuario_id}`)\n"
-            f"**Ticket:** {canal.mention}\n"
+            f"**Ticket:** {channel.mention}\n"
             f"**Razón:** Tiene rol de staff/bypass — no se aplicó blacklist.",
         )
-        return
+        return False
 
-    # ── Verificar blacklist ─────────────────
+    # ── Consultar blacklist ─────────────────
     en_blacklist = False
     registro = None
 
@@ -1116,19 +1199,15 @@ async def _on_guild_channel_create(channel: discord.abc.GuildChannel, bot: comma
         if registro:
             en_blacklist = True
     except Exception as e:
-        logger.error(
-            "Error al consultar blacklist en DB para %s (ticket %s): %s",
-            usuario_id, canal.id, e,
+        logger_scanner.error(
+            "[%s] Error consultando blacklist para %s: %s", origen, usuario_id, e,
         )
-        # DB caída: no sabemos si está en blacklist.
-        # Si hay fallback por rol y está configurado, lo usamos como respaldo.
         if BLACKLIST_ALLOW_ROLE_FALLBACK and BLACKLIST_POSTULACIONES_ROLE_ID:
             rol = guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
             if rol and rol in miembro.roles:
                 en_blacklist = True
                 registro = {"motivo": "PostgreSQL no disponible · bloqueado por rol de respaldo"}
 
-    # Configurable: permitir o no usar el rol como respaldo (Punto 7)
     if not en_blacklist and BLACKLIST_ALLOW_ROLE_FALLBACK and BLACKLIST_POSTULACIONES_ROLE_ID:
         rol = guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
         if rol and rol in miembro.roles:
@@ -1136,72 +1215,129 @@ async def _on_guild_channel_create(channel: discord.abc.GuildChannel, bot: comma
             if not registro:
                 registro = {"motivo": "Sin motivo registrado (solo rol presente) · posible inconsistencia"}
 
-    if en_blacklist and registro:
-        await _notificar_blacklist(canal, registro, miembro)
+    logger_scanner.info("[%s] Usuario %s en blacklist: %s", origen, usuario_id, en_blacklist)
 
-        try:
-            db.registrar_intento(str(usuario_id), str(canal.id), registro.get("motivo"))
-        except Exception as e:
-            logger.error(
-                "Error al registrar intento en DB para %s (ticket %s): %s",
-                usuario_id, canal.id, e,
-            )
+    if not en_blacklist or not registro:
+        return False
 
-        log_actions.log_info(
-            "\U0001f6ab Ticket blacklist detectado",
-            f"**Usuario:** {miembro} (`{usuario_id}`)\n"
-            f"**Ticket:** {canal.mention}\n"
-            f"**Motivo:** {registro['motivo']}",
+    # ── Notificar ────────────────────────────
+    _tickets_notificados.add(channel.id)
+    _persistir_notificados()
+
+    await _notificar_blacklist(channel, registro, miembro)
+
+    try:
+        db.registrar_intento(str(usuario_id), str(channel.id), registro.get("motivo"))
+    except Exception as e:
+        logger_scanner.error(
+            "[%s] Error registrando intento en DB para %s: %s", origen, usuario_id, e,
         )
 
-        # ── Alerta opcional a staff (Punto 8) ──
-        if BLACKLIST_STAFF_ALERT_CHANNEL_ID:
-            alert_channel = guild.get_channel(BLACKLIST_STAFF_ALERT_CHANNEL_ID)
-            if alert_channel and isinstance(alert_channel, discord.TextChannel):
+    log_actions.log_info(
+        "\U0001f6ab Ticket blacklist detectado",
+        f"**Usuario:** {miembro} (`{usuario_id}`)\n"
+        f"**Ticket:** {channel.mention}\n"
+        f"**Motivo:** {registro['motivo']}\n"
+        f"**Origen:** {origen}",
+    )
+
+    # ── Alerta opcional a staff ─────────────
+    if BLACKLIST_STAFF_ALERT_CHANNEL_ID:
+        alert_channel = guild.get_channel(BLACKLIST_STAFF_ALERT_CHANNEL_ID)
+        if alert_channel and isinstance(alert_channel, discord.TextChannel):
+            try:
+                nombre_ic = None
                 try:
-                    # Intentar obtener Nombre IC de los mensajes disponibles
-                    nombre_ic = None
-                    try:
-                        mensajes = await _obtener_mensajes_ticket(canal, limite=10)
-                        nombre_ic = _extraer_nombre_ic(mensajes)
-                    except Exception:
-                        pass
-
-                    link_ticket = f"https://discord.com/channels/{guild.id}/{canal.id}"
-                    desc_lines = [
-                        f"**Usuario:** {miembro.mention} (`{usuario_id}`)",
-                        f"**Discord ID:** `{usuario_id}`",
-                    ]
-                    if nombre_ic:
-                        desc_lines.append(f"**Nombre IC:** {nombre_ic}")
-                    desc_lines.append(f"**Motivo:** {registro['motivo']}")
-                    desc_lines.append(f"**Ticket:** {canal.mention} ([Abrir]({link_ticket}))")
-                    desc_lines.append("")
-                    desc_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    desc_lines.append(
-                        "**⚠ Acción requerida:** revisar y cerrar este ticket "
-                        "mediante Ticket Tool."
-                    )
-
-                    alert_embed = discord.Embed(
-                        title="\u26a0\ufe0f Ticket de blacklist abierto",
-                        description="\n".join(desc_lines),
-                        color=0xe74c3c,
-                    )
-                    kwargs: dict = {"embed": alert_embed}
-                    if BLACKLIST_STAFF_ALERT_ROLE_ID:
-                        alert_role = guild.get_role(BLACKLIST_STAFF_ALERT_ROLE_ID)
-                        if alert_role:
-                            kwargs["content"] = alert_role.mention
-                    await alert_channel.send(**kwargs)
+                    mensajes = await _obtener_mensajes_ticket(channel, limite=10)
+                    nombre_ic = _extraer_nombre_ic(mensajes)
                 except Exception:
                     pass
+
+                link_ticket = f"https://discord.com/channels/{guild.id}/{channel.id}"
+                desc_lines = [
+                    f"**Usuario:** {miembro.mention} (`{usuario_id}`)",
+                    f"**Discord ID:** `{usuario_id}`",
+                ]
+                if nombre_ic:
+                    desc_lines.append(f"**Nombre IC:** {nombre_ic}")
+                desc_lines.append(f"**Motivo:** {registro['motivo']}")
+                desc_lines.append(f"**Ticket:** {channel.mention} ([Abrir]({link_ticket}))")
+                desc_lines.append("")
+                desc_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+                desc_lines.append(
+                    "**⚠ Acción requerida:** revisar y cerrar este ticket "
+                    "mediante Ticket Tool."
+                )
+
+                alert_embed = discord.Embed(
+                    title="\u26a0\ufe0f Ticket de blacklist abierto",
+                    description="\n".join(desc_lines),
+                    color=0xe74c3c,
+                )
+                kwargs: dict = {"embed": alert_embed}
+                if BLACKLIST_STAFF_ALERT_ROLE_ID:
+                    alert_role = guild.get_role(BLACKLIST_STAFF_ALERT_ROLE_ID)
+                    if alert_role:
+                        kwargs["content"] = alert_role.mention
+                await alert_channel.send(**kwargs)
+            except Exception:
+                pass
+
+    logger_scanner.info("[%s] Aviso enviado en ticket %s para %s", origen, channel.id, usuario_id)
+    return True
+
+
+async def _on_guild_channel_create(channel: discord.abc.GuildChannel, bot: commands.Bot):
+    """Wrapper para on_guild_channel_create que delega en check_ticket_blacklist."""
+    await check_ticket_blacklist(channel, bot, origen="channel_create")
 
 
 def _setup_ticket_event(bot: commands.Bot):
     async def wrapper(channel):
         await _on_guild_channel_create(channel, bot)
     bot.add_listener(wrapper, "on_guild_channel_create")
+
+
+# ── Detección por cambio de categoría ────
+
+async def _on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel, bot: commands.Bot):
+    """Detecta cuando Ticket Tool mueve un canal a la categoría de postulaciones
+    después de crearlo (on_guild_channel_create se dispara antes de que
+    la categoría esté asignada)."""
+    if before.category_id == after.category_id:
+        return
+    if after.category_id != POSTULACIONES_CATEGORY_ID:
+        return
+    logger_scanner.info(
+        "channel_update: canal %s movido a categoría postulaciones (antes: %s)",
+        after.id, before.category_id,
+    )
+    await check_ticket_blacklist(after, bot, origen="channel_update")
+
+
+def _setup_ticket_update_event(bot: commands.Bot):
+    async def wrapper(before, after):
+        await _on_guild_channel_update(before, after, bot)
+    bot.add_listener(wrapper, "on_guild_channel_update")
+
+
+# ── Fallback: detección por mensaje ──────
+
+def _setup_ticket_fallback(bot: commands.Bot):
+    """Escucha on_message como respaldo adicional. Delega en check_ticket_blacklist."""
+    async def wrapper(message: discord.Message):
+        if message.author.id == bot.user.id:
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+        if message.channel.category_id != POSTULACIONES_CATEGORY_ID:
+            return
+        if message.channel.id in _tickets_notificados:
+            return
+        if _es_staff(message.author):
+            return
+        await check_ticket_blacklist(message.channel, bot, origen="message_fallback")
+    bot.add_listener(wrapper, "on_message")
 
 
 async def _on_member_join(member: discord.Member, bot: commands.Bot):
@@ -1249,6 +1385,105 @@ def _setup_member_join_event(bot: commands.Bot):
     bot.add_listener(wrapper, "on_member_join")
 
 
+# ── Limpieza de notificados antiguos ──────
+
+async def _limpiar_notificados_antiguos(bot: commands.Bot):
+    """
+    Recorre _tickets_notificados y descarta aquellos canales
+    que ya no existen (tickets cerrados/eliminados).
+    Evita que el archivo persistente crezca sin límite.
+    """
+    if not _tickets_notificados:
+        return
+
+    antes = len(_tickets_notificados)
+    ids_a_remover = []
+
+    for cid in list(_tickets_notificados):
+        canal = bot.get_channel(cid)
+        if canal is None:
+            ids_a_remover.append(cid)
+
+    for cid in ids_a_remover:
+        _tickets_notificados.discard(cid)
+
+    despues = len(_tickets_notificados)
+    if ids_a_remover:
+        _persistir_notificados()
+        logger_scanner.info(
+            "Limpieza de notificados antiguos: %s eliminados (%s → %s)",
+            len(ids_a_remover), antes, despues,
+        )
+
+
+# ── Escaneo inicial tras reinicio ─────────
+
+async def scan_open_tickets(bot: commands.Bot):
+    """
+    Recorre todos los servidores y canales dentro de la categoría
+    de postulaciones, verificando si el creador de cada ticket
+    abierto está en blacklist.
+
+    Se ejecuta una vez al iniciar el bot para cubrir tickets que
+    quedaron abiertos antes del reinicio.
+    """
+    await bot.wait_until_ready()
+
+    # Limpiar notificados de canales que ya no existen
+    await _limpiar_notificados_antiguos(bot)
+
+    if POSTULACIONES_CATEGORY_ID == 0:
+        logger_scanner.warning("scan_open_tickets: POSTULACIONES_CATEGORY_ID no configurado")
+        return
+
+    logger_scanner.info("Escaneando tickets abiertos...")
+    total = 0
+    notificados = 0
+    errores = 0
+
+    for guild in bot.guilds:
+        categoria = guild.get_channel(POSTULACIONES_CATEGORY_ID)
+        if not categoria:
+            logger_scanner.debug("Categoría %s no encontrada en guild %s", POSTULACIONES_CATEGORY_ID, guild.id)
+            continue
+
+        canales = getattr(categoria, "channels", [])
+        for channel in canales:
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            if channel.id in _tickets_notificados:
+                continue
+
+            total += 1
+            logger_scanner.info("Ticket encontrado: canal=%s guild=%s", channel.id, guild.id)
+
+            try:
+                if await check_ticket_blacklist(channel, bot, origen="startup_scan"):
+                    notificados += 1
+            except Exception as e:
+                errores += 1
+                logger_scanner.error(
+                    "Error escaneando ticket %s en guild %s: %s",
+                    channel.id, guild.id, e,
+                )
+
+        # Pequeña pausa entre servidores para no saturar la API
+        if len(bot.guilds) > 1:
+            await asyncio.sleep(0.5)
+
+    logger_scanner.info(
+        "Escaneo completado: %s tickets revisados, %s notificaciones enviadas, %s errores",
+        total, notificados, errores,
+    )
+    if notificados > 0:
+        log_actions.log_info(
+            "\U0001f6ab Escaneo inicial blacklist",
+            f"Se revisaron {total} tickets abiertos.\n"
+            f"**Notificaciones enviadas:** {notificados}\n"
+            f"**Errores:** {errores}",
+        )
+
+
 class BlacklistCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1258,5 +1493,10 @@ async def setup(bot: commands.Bot):
     db.init()
     _setup_blacklist_commands(bot)
     _setup_ticket_event(bot)
+    _setup_ticket_update_event(bot)
+    _setup_ticket_fallback(bot)
     _setup_member_join_event(bot)
+    _cargar_notificados()
     logger.info("Módulo de blacklist de postulaciones cargado")
+    # Escaneo inicial de tickets abiertos (recuperación tras reinicio)
+    asyncio.create_task(scan_open_tickets(bot))
