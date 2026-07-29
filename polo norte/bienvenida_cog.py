@@ -3,6 +3,7 @@ import discord
 from discord import app_commands
 import config_manager
 import log_actions
+from aprobar import _tiene_permiso, ROL_AUTORIZADO_ID
 
 logger = logging.getLogger("Bienvenida")
 
@@ -50,8 +51,21 @@ async def config_bienvenida(interaction: discord.Interaction):
 
 @app_commands.command(name="bienvenida", description="Envía el mensaje de bienvenida en el canal actual")
 @app_commands.describe(usuario="Usuario al que dirigir la bienvenida (opcional)")
-@app_commands.default_permissions(administrator=True)
 async def bienvenida(interaction: discord.Interaction, usuario: discord.Member = None):
+    if not interaction.guild:
+        await interaction.response.send_message("❌ Este comando solo puede usarse en un servidor.", ephemeral=True)
+        return
+
+    admin = interaction.user
+    if not isinstance(admin, discord.Member) or not _tiene_permiso(admin):
+        await interaction.response.send_message(
+            "❌ No tenés permisos suficientes para usar este comando.\n"
+            "Necesitás el permiso **Administrador**, **Gestionar Roles**, "
+            f"o el rol <@&{ROL_AUTORIZADO_ID}>.",
+            ephemeral=True,
+        )
+        return
+
     config = config_manager.load_bienvenida_config()
     mensaje = config.get("mensaje", "")
     if not mensaje:

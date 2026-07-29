@@ -168,7 +168,6 @@ async def _enviar_felicitaciones(channel: discord.TextChannel, member: discord.M
 
 @app_commands.command(name="aprobar", description="Aprueba la postulación de un usuario")
 @app_commands.describe(usuario="Usuario a aprobar")
-@app_commands.default_permissions(administrator=True)
 async def aprobar(interaction: discord.Interaction, usuario: discord.Member):
     if not interaction.guild:
         await interaction.response.send_message("❌ Este comando solo puede usarse en un servidor.", ephemeral=True)
