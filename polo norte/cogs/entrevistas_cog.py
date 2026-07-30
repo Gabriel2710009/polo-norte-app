@@ -239,6 +239,10 @@ async def finalizar_entrevista(session: InterviewSession):
         logger.exception("Error generando plantilla de errores")
         plantilla_err = ""
 
+    logger.info(
+        "Enviando plantillas entrevista - canales en cache: %s",
+        {k: v for k, v in postulacion_config_cache.items()},
+    )
     post_channel = bot.get_channel(postulacion_config_cache["postulacion_channel_id"]) if postulacion_config_cache["postulacion_channel_id"] else None
     err_channel = bot.get_channel(postulacion_config_cache["errores_channel_id"]) if postulacion_config_cache["errores_channel_id"] else None
 

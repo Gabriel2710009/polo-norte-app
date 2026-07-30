@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 from datetime import datetime, timezone
@@ -318,9 +319,9 @@ def guardar_entrevista(
                 resultado,
                 intento,
                 total_errores,
-                preguntas_used,
-                respuestas,
-                motivos or {},
+                json.dumps(preguntas_used, ensure_ascii=False, default=str),
+                json.dumps(respuestas, ensure_ascii=False),
+                json.dumps(motivos or {}, ensure_ascii=False, default=str),
             ),
         )
         entrevista_id = cur.fetchone()[0]
