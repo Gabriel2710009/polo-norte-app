@@ -16,6 +16,7 @@ from cogs import config_aprobar_cog
 from cogs import bienvenida_cog
 from cogs import blacklist_cog
 from cogs import help_cog
+from cogs import entrevistas_cog
 
 load_dotenv()
 
@@ -77,13 +78,14 @@ async def on_ready():
     await bienvenida_cog.setup(bot)
     await blacklist_cog.setup(bot)
     await help_cog.setup(bot)
+    await entrevistas_cog.setup(bot)
 
     try:
         db.init()
         logger.info("DB inicializada correctamente")
         log_actions.log_info("\u2705 DB inicializada", "Conexi\u00f3n a PostgreSQL establecida y tablas listas.")
     except Exception as e:
-        logger.critical("Error inicializando DB: %s", e)
+        logger.error("Error inicializando DB: %s", e)
         await log_actions.log_error("\u274c Error DB", f"No se pudo inicializar la base de datos:\n`{e}`")
         return
 
@@ -109,7 +111,11 @@ async def on_ready():
 
     try:
         await bot.tree.sync()
-        logger.info("Comandos slash sincronizados")
+        cmds = [c.name for c in bot.tree.get_commands()]
+        logger.info(
+            "Comandos slash sincronizados: %d comandos registrados - %s",
+            len(cmds), ", ".join(f"/{c}" for c in cmds),
+        )
     except Exception as e:
         logger.error("Error sincronizando comandos: %s", e)
         await log_actions.log_error("\u274c Error sync", f"No se pudieron sincronizar los comandos slash:\n`{e}`")
