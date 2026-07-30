@@ -98,7 +98,6 @@ def init():
             CREATE TABLE IF NOT EXISTS {_TABLE_CONFIG} (
                 id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
                 log_channel_id TEXT DEFAULT '0',
-                postulacion_channel_id TEXT DEFAULT '0',
                 errores_channel_id TEXT DEFAULT '0',
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_by TEXT
@@ -448,7 +447,7 @@ def cargar_configuracion() -> dict[str, str]:
         if row:
             cols = [desc[0] for desc in cur.description]
             return dict(zip(cols, row))
-        return {"log_channel_id": "0", "postulacion_channel_id": "0", "errores_channel_id": "0"}
+        return {"log_channel_id": "0", "errores_channel_id": "0"}
     except Exception as e:
         logger.error("Error cargando configuraci\u00f3n: %s", e)
         raise
@@ -458,7 +457,7 @@ def cargar_configuracion() -> dict[str, str]:
 
 
 def actualizar_configuracion(clave: str, valor: str, actualizado_por: str):
-    if clave not in ("log_channel_id", "postulacion_channel_id", "errores_channel_id"):
+    if clave not in ("log_channel_id", "errores_channel_id"):
         raise ValueError(f"Clave de configuraci\u00f3n inv\u00e1lida: {clave}")
 
     conn = _get_conn()

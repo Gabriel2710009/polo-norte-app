@@ -43,7 +43,6 @@ active_interviews: dict[int, InterviewSession] = {}
 
 postulacion_config_cache: dict[str, int] = {
     "log_channel_id": 0,
-    "postulacion_channel_id": 0,
     "errores_channel_id": 0,
 }
 
@@ -53,13 +52,11 @@ def _load_config():
         config = entrevistas_db.cargar_configuracion()
         postulacion_config_cache = {
             "log_channel_id": int(config.get("log_channel_id", 0)),
-            "postulacion_channel_id": int(config.get("postulacion_channel_id", 0)),
             "errores_channel_id": int(config.get("errores_channel_id", 0)),
         }
         logger.info(
-            "Configuraci\u00f3n de postulaci\u00f3n cargada: log=%s post=%s err=%s",
+            "Configuraci\u00f3n de postulaci\u00f3n cargada: log=%s err=%s",
             postulacion_config_cache["log_channel_id"],
-            postulacion_config_cache["postulacion_channel_id"],
             postulacion_config_cache["errores_channel_id"],
         )
         if os.getenv("ENTREVISTAS_LOG_CHANNEL_ID") or os.getenv("ENTREVISTAS_POSTULACION_CHANNEL_ID") or os.getenv("ENTREVISTAS_ERRORES_CHANNEL_ID"):
@@ -243,7 +240,7 @@ async def finalizar_entrevista(session: InterviewSession):
         "Enviando plantillas entrevista - canales en cache: %s",
         {k: v for k, v in postulacion_config_cache.items()},
     )
-    post_channel = bot.get_channel(postulacion_config_cache["postulacion_channel_id"]) if postulacion_config_cache["postulacion_channel_id"] else None
+    post_channel = bot.get_channel(session.channel_id)
     err_channel = bot.get_channel(postulacion_config_cache["errores_channel_id"]) if postulacion_config_cache["errores_channel_id"] else None
 
     if post_channel and isinstance(post_channel, discord.TextChannel):
@@ -1071,21 +1068,12 @@ class ConfigPostulacionView(View):
             await interaction.response.send_message("\u274c Este comando solo puede usarse en un servidor.", ephemeral=True)
             return
 
-        postulacion_cid = interaction.channel.id
-        postulacion_config_cache["postulacion_channel_id"] = postulacion_cid
-        try:
-            entrevistas_db.actualizar_configuracion("postulacion_channel_id", str(postulacion_cid), str(interaction.user.id))
-        except Exception as e:
-            logger.error("Error guardando postulacion_channel_id: %s", e)
-
         pendientes = [
             ("log_channel_id", self.log_channel_id, "\U0001f4dc Canal de logs"),
             ("errores_channel_id", self.errores_channel_id, "\u274c Canal de errores"),
         ]
         errores = []
-        exitosos = [
-            f"\U0001f4cb Canal de postulaciones (auto): <#{postulacion_cid}>",
-        ]
+        exitosos = []
 
         for clave, cid, label in pendientes:
             if not cid:
@@ -1150,7 +1138,6 @@ async def config_postulacion(interaction: discord.Interaction):
     )
     embed.add_field(name="\U0001f4dc Canal de logs", value=log_st, inline=False)
     embed.add_field(name="\u274c Canal de errores", value=err_st, inline=False)
-    embed.add_field(name="\U0001f4cb Canal de postulaciones (auto)", value=f"<#{interaction.channel.id}>", inline=False)
     embed.set_footer(text="Seleccion\u00e1 los canales y luego presion\u00e1 Guardar.")
 
     await interaction.response.send_message(embed=embed, view=ConfigPostulacionView(), ephemeral=True)
