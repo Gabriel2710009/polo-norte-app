@@ -102,6 +102,19 @@ def calcular_resultado(session: InterviewSession) -> dict[str, Any]:
     }
 
 
+def _build_pregunta_embed(pregunta: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="\u2753 Pregunta",
+        description=pregunta["pregunta"],
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Categor\u00eda", value=pregunta.get("categoria", "?"), inline=True)
+    resp = pregunta.get("respuesta_esperada", "")
+    if resp:
+        embed.add_field(name="Respuesta esperada", value=resp, inline=False)
+    return embed
+
+
 def mostrar_pregunta_actual(session: InterviewSession) -> discord.Embed:
     if session.current_index >= len(session.questions):
         return discord.Embed(
@@ -120,6 +133,9 @@ def mostrar_pregunta_actual(session: InterviewSession) -> discord.Embed:
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(name="Categor\u00eda", value=pregunta["categoria"], inline=True)
+    resp = pregunta.get("respuesta_esperada", "")
+    if resp:
+        embed.add_field(name="Respuesta esperada", value=resp, inline=False)
     embed.set_footer(text=f"Intento {session.intento}/{entrevistas_db.MAX_INTENTOS}")
     return embed
 
@@ -339,6 +355,14 @@ class PreguntaModal(Modal, title="Agregar pregunta"):
             required=True,
         )
         self.add_item(self.pregunta_input)
+        self.respuesta_input = TextInput(
+            label="Respuesta esperada",
+            style=discord.TextStyle.paragraph,
+            placeholder="Escribe la respuesta esperada...",
+            max_length=4000,
+            required=False,
+        )
+        self.add_item(self.respuesta_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         texto = self.pregunta_input.value.strip()
@@ -350,6 +374,7 @@ class PreguntaModal(Modal, title="Agregar pregunta"):
                 pregunta=texto,
                 categoria=self.categoria,
                 creado_por=str(interaction.user.id),
+                respuesta_esperada=self.respuesta_input.value.strip(),
             )
             await interaction.response.send_message(
                 f"\u2705 Pregunta agregada correctamente (ID: {q_id})",
@@ -364,7 +389,7 @@ class PreguntaModal(Modal, title="Agregar pregunta"):
 
 
 class EditarPreguntaModal(Modal, title="Editar pregunta"):
-    def __init__(self, pregunta_id: int, texto_actual: str):
+    def __init__(self, pregunta_id: int, texto_actual: str, categoria_actual: str, respuesta_actual: str):
         super().__init__()
         self.pregunta_id = pregunta_id
         self.pregunta_input = TextInput(
@@ -375,14 +400,41 @@ class EditarPreguntaModal(Modal, title="Editar pregunta"):
             required=True,
         )
         self.add_item(self.pregunta_input)
+        self.categoria_input = TextInput(
+            label="Categor\u00eda (GENERAL, ARMERIA, CASOS_PRACTICOS)",
+            placeholder="Ej: GENERAL",
+            default=categoria_actual,
+            max_length=20,
+            required=True,
+        )
+        self.add_item(self.categoria_input)
+        self.respuesta_input = TextInput(
+            label="Respuesta esperada",
+            style=discord.TextStyle.paragraph,
+            default=respuesta_actual,
+            max_length=4000,
+            required=False,
+        )
+        self.add_item(self.respuesta_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         texto = self.pregunta_input.value.strip()
+        cat = self.categoria_input.value.strip().upper()
         if not texto:
             await interaction.response.send_message("\u274c La pregunta no puede estar vac\u00eda.", ephemeral=True)
             return
+        if cat not in entrevistas_db.CATEGORIAS_VALIDAS:
+            await interaction.response.send_message(
+                f"\u274c Categor\u00eda inv\u00e1lida. V\u00e1lidas: {', '.join(sorted(entrevistas_db.CATEGORIAS_VALIDAS))}",
+                ephemeral=True,
+            )
+            return
         try:
-            actualizado = entrevistas_db.editar_pregunta(self.pregunta_id, texto)
+            actualizado = entrevistas_db.editar_pregunta(
+                self.pregunta_id, texto,
+                nueva_categoria=cat,
+                respuesta_esperada=self.respuesta_input.value.strip(),
+            )
             if actualizado:
                 await interaction.response.send_message(
                     f"\u2705 Pregunta ID {self.pregunta_id} actualizada.", ephemeral=True,
@@ -642,17 +694,11 @@ class PreguntaSelect(discord.ui.Select):
             )
             return
 
-        if self._mode == "editar":
-            await interaction.response.send_modal(EditarPreguntaModal(pregunta_id, pregunta["pregunta"]))
-        else:
-            texto = pregunta["pregunta"]
-            if len(texto) > 100:
-                texto = texto[:97] + "..."
-            view = ConfirmDeleteView(pregunta_id, texto)
-            await interaction.response.edit_message(
-                content=f"**\u00bfSeguro que quieres eliminar esta pregunta?**\n\n{texto}",
-                view=view,
-            )
+        embed = _build_pregunta_embed(pregunta)
+        await interaction.response.edit_message(
+            embed=embed,
+            view=QuestionDetailView(pregunta),
+        )
 
 
 class ConfirmDeleteView(View):
@@ -687,6 +733,38 @@ class ConfirmDeleteView(View):
     async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="\u274c Operaci\u00f3n cancelada.",
+            view=None,
+        )
+
+
+class QuestionDetailView(View):
+    def __init__(self, pregunta: dict):
+        super().__init__(timeout=120)
+        self.pregunta = pregunta
+
+    @discord.ui.button(label="\u270f\ufe0f Editar", style=discord.ButtonStyle.primary)
+    async def editar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EditarPreguntaModal(
+            self.pregunta["id"],
+            self.pregunta["pregunta"],
+            self.pregunta.get("categoria", ""),
+            self.pregunta.get("respuesta_esperada", ""),
+        ))
+
+    @discord.ui.button(label="\U0001f5d1\ufe0f Eliminar", style=discord.ButtonStyle.danger)
+    async def eliminar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        texto = self.pregunta["pregunta"]
+        if len(texto) > 100:
+            texto = texto[:97] + "..."
+        await interaction.response.edit_message(
+            content=f"**\u00bfSeguro que quieres eliminar esta pregunta?**\n\n{texto}",
+            view=ConfirmDeleteView(self.pregunta["id"], texto),
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Operaci\u00f3n cancelada.",
             view=None,
         )
 

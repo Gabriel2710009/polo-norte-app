@@ -60,6 +60,9 @@ def init():
             CREATE INDEX IF NOT EXISTS idx_{_TABLE_PREGUNTAS}_activo
             ON {_TABLE_PREGUNTAS} (activo)
         """)
+        cur.execute(f"""
+            ALTER TABLE {_TABLE_PREGUNTAS} ADD COLUMN IF NOT EXISTS respuesta_esperada TEXT DEFAULT ''
+        """)
 
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS {_TABLE_ENTREVISTAS} (
@@ -116,7 +119,7 @@ def init():
         _close_conn(conn)
 
 
-def agregar_pregunta(pregunta: str, categoria: str, creado_por: str) -> int:
+def agregar_pregunta(pregunta: str, categoria: str, creado_por: str, respuesta_esperada: str = "") -> int:
     if categoria not in CATEGORIAS_VALIDAS:
         raise ValueError(f"Categoria inv\u00e1lida: {categoria}. V\u00e1lidas: {', '.join(sorted(CATEGORIAS_VALIDAS))}")
 
@@ -124,8 +127,8 @@ def agregar_pregunta(pregunta: str, categoria: str, creado_por: str) -> int:
     cur = conn.cursor()
     try:
         cur.execute(
-            f"INSERT INTO {_TABLE_PREGUNTAS} (pregunta, categoria, creado_por) VALUES (%s, %s, %s) RETURNING id",
-            (pregunta, categoria, creado_por),
+            f"INSERT INTO {_TABLE_PREGUNTAS} (pregunta, categoria, creado_por, respuesta_esperada) VALUES (%s, %s, %s, %s) RETURNING id",
+            (pregunta, categoria, creado_por, respuesta_esperada),
         )
         pregunta_id = cur.fetchone()[0]
         conn.commit()
@@ -140,13 +143,23 @@ def agregar_pregunta(pregunta: str, categoria: str, creado_por: str) -> int:
         _close_conn(conn)
 
 
-def editar_pregunta(pregunta_id: int, nueva_pregunta: str) -> bool:
+def editar_pregunta(pregunta_id: int, nueva_pregunta: str, nueva_categoria: str = "", respuesta_esperada: str = "") -> bool:
     conn = _get_conn()
     cur = conn.cursor()
     try:
+        campos = ["pregunta = %s"]
+        params: list[Any] = [nueva_pregunta]
+        if nueva_categoria:
+            if nueva_categoria not in CATEGORIAS_VALIDAS:
+                raise ValueError(f"Categoria inv\u00e1lida: {nueva_categoria}. V\u00e1lidas: {', '.join(sorted(CATEGORIAS_VALIDAS))}")
+            campos.append("categoria = %s")
+            params.append(nueva_categoria)
+        campos.append("respuesta_esperada = %s")
+        params.append(respuesta_esperada)
+        params.append(pregunta_id)
         cur.execute(
-            f"UPDATE {_TABLE_PREGUNTAS} SET pregunta = %s WHERE id = %s",
-            (nueva_pregunta, pregunta_id),
+            f"UPDATE {_TABLE_PREGUNTAS} SET {', '.join(campos)} WHERE id = %s",
+            params,
         )
         conn.commit()
         actualizado = cur.rowcount > 0
@@ -261,7 +274,7 @@ def seleccionar_preguntas_aleatorias(categoria: str, cantidad: int = 5) -> list[
     cur = conn.cursor()
     try:
         cur.execute(
-            f"SELECT id, pregunta, categoria FROM {_TABLE_PREGUNTAS} "
+            f"SELECT id, pregunta, categoria, respuesta_esperada FROM {_TABLE_PREGUNTAS} "
             "WHERE categoria = %s AND activo = TRUE ORDER BY RANDOM() LIMIT %s",
             (categoria, cantidad),
         )
