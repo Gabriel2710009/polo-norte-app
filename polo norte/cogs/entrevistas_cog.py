@@ -912,7 +912,7 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
 
 
 class ManualIdModal(Modal, title="Configurar canales manualmente"):
-    def __init__(self, log_id: int, post_id: int, err_id: int):
+    def __init__(self, log_id: int, err_id: int):
         super().__init__()
         self.log_input = TextInput(
             label="ID canal logs",
@@ -922,14 +922,6 @@ class ManualIdModal(Modal, title="Configurar canales manualmente"):
             max_length=20,
         )
         self.add_item(self.log_input)
-        self.post_input = TextInput(
-            label="ID canal postulaciones",
-            placeholder="Ej: 123456789012345678",
-            default=str(post_id) if post_id else "",
-            required=False,
-            max_length=20,
-        )
-        self.add_item(self.post_input)
         self.err_input = TextInput(
             label="ID canal errores",
             placeholder="Ej: 123456789012345678",
@@ -944,7 +936,6 @@ class ManualIdModal(Modal, title="Configurar canales manualmente"):
         try:
             for clave, raw, label in [
                 ("log_channel_id", self.log_input.value.strip(), "\U0001f4dc Logs"),
-                ("postulacion_channel_id", self.post_input.value.strip(), "\U0001f4dd Postulaci\u00f3n"),
                 ("errores_channel_id", self.err_input.value.strip(), "\u274c Errores"),
             ]:
                 if raw:
@@ -969,7 +960,6 @@ class ConfigPostulacionView(View):
     def __init__(self):
         super().__init__(timeout=300)
         self.log_channel_id = postulacion_config_cache.get("log_channel_id", 0)
-        self.postulacion_channel_id = postulacion_config_cache.get("postulacion_channel_id", 0)
         self.errores_channel_id = postulacion_config_cache.get("errores_channel_id", 0)
 
         log_select = discord.ui.ChannelSelect(
@@ -981,16 +971,6 @@ class ConfigPostulacionView(View):
             await interaction.response.defer()
         log_select.callback = _on_log
         self.add_item(log_select)
-
-        post_select = discord.ui.ChannelSelect(
-            channel_types=[discord.ChannelType.text],
-            placeholder="\U0001f4cb Canal de postulaciones...",
-        )
-        async def _on_post(interaction: discord.Interaction):
-            self.postulacion_channel_id = post_select.values[0].id
-            await interaction.response.defer()
-        post_select.callback = _on_post
-        self.add_item(post_select)
 
         err_select = discord.ui.ChannelSelect(
             channel_types=[discord.ChannelType.text],
@@ -1009,13 +989,21 @@ class ConfigPostulacionView(View):
             await interaction.response.send_message("\u274c Este comando solo puede usarse en un servidor.", ephemeral=True)
             return
 
+        postulacion_cid = interaction.channel.id
+        postulacion_config_cache["postulacion_channel_id"] = postulacion_cid
+        try:
+            entrevistas_db.actualizar_configuracion("postulacion_channel_id", str(postulacion_cid), str(interaction.user.id))
+        except Exception as e:
+            logger.error("Error guardando postulacion_channel_id: %s", e)
+
         pendientes = [
             ("log_channel_id", self.log_channel_id, "\U0001f4dc Canal de logs"),
-            ("postulacion_channel_id", self.postulacion_channel_id, "\U0001f4dd Canal de postulaciones"),
             ("errores_channel_id", self.errores_channel_id, "\u274c Canal de errores"),
         ]
         errores = []
-        exitosos = []
+        exitosos = [
+            f"\U0001f4cb Canal de postulaciones (auto): <#{postulacion_cid}>",
+        ]
 
         for clave, cid, label in pendientes:
             if not cid:
@@ -1049,7 +1037,6 @@ class ConfigPostulacionView(View):
     async def manual_ids(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ManualIdModal(
             log_id=self.log_channel_id,
-            post_id=self.postulacion_channel_id,
             err_id=self.errores_channel_id,
         ))
 
@@ -1072,7 +1059,6 @@ async def config_postulacion(interaction: discord.Interaction):
 
     config = postulacion_config_cache
     log_st = f"<#{config['log_channel_id']}>" if config["log_channel_id"] else "\u274c No configurado"
-    post_st = f"<#{config['postulacion_channel_id']}>" if config["postulacion_channel_id"] else "\u274c No configurado"
     err_st = f"<#{config['errores_channel_id']}>" if config["errores_channel_id"] else "\u274c No configurado"
 
     embed = discord.Embed(
@@ -1081,8 +1067,8 @@ async def config_postulacion(interaction: discord.Interaction):
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(name="\U0001f4dc Canal de logs", value=log_st, inline=False)
-    embed.add_field(name="\U0001f4cb Canal de postulaciones", value=post_st, inline=False)
     embed.add_field(name="\u274c Canal de errores", value=err_st, inline=False)
+    embed.add_field(name="\U0001f4cb Canal de postulaciones (auto)", value=f"<#{interaction.channel.id}>", inline=False)
     embed.set_footer(text="Seleccion\u00e1 los canales y luego presion\u00e1 Guardar.")
 
     await interaction.response.send_message(embed=embed, view=ConfigPostulacionView(), ephemeral=True)
