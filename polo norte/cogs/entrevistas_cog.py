@@ -99,6 +99,39 @@ def calcular_resultado(session: InterviewSession) -> dict[str, Any]:
     }
 
 
+def _build_preguntas_log_text(session: InterviewSession) -> str:
+    partes: list[str] = []
+    for i, q in enumerate(session.questions, 1):
+        texto = q["pregunta"]
+        cat = q.get("categoria", "?")
+        partes.append(f"{i}. {texto}\n   Categor\u00eda: {cat}")
+    return "\n\n".join(partes)
+
+
+def _agregar_preguntas_al_embed(embed: discord.Embed, session: InterviewSession):
+    texto = _build_preguntas_log_text(session)
+    if not texto:
+        return
+    limites = 1024
+    if len(texto) <= limites:
+        embed.add_field(name="\U0001f4cb Preguntas realizadas", value=texto, inline=False)
+    else:
+        partes = []
+        for linea in texto.split("\n\n"):
+            if partes and len(partes[-1]) + len(linea) + 2 > limites:
+                partes.append("")
+            if partes and partes[-1]:
+                partes[-1] += "\n\n" + linea
+            else:
+                partes.append(linea)
+        total = len(partes)
+        for i, p in enumerate(partes, 1):
+            embed.add_field(
+                name=f"\U0001f4cb Preguntas realizadas ({i}/{total})",
+                value=p, inline=False,
+            )
+
+
 def _build_pregunta_embed(pregunta: dict) -> discord.Embed:
     embed = discord.Embed(
         title="\u2753 Pregunta",
@@ -237,17 +270,24 @@ async def finalizar_entrevista(session: InterviewSession):
         plantilla_err = ""
 
     logger.info(
-        "Enviando plantillas entrevista - canales en cache: %s",
-        {k: v for k, v in postulacion_config_cache.items()},
+        "Enviando plantilla al ticket: user=%s channel_id=%s",
+        session.user_id, session.channel_id,
     )
-    post_channel = bot.get_channel(session.channel_id)
-    err_channel = bot.get_channel(postulacion_config_cache["errores_channel_id"]) if postulacion_config_cache["errores_channel_id"] else None
 
-    if post_channel and isinstance(post_channel, discord.TextChannel):
+    post_channel = bot.get_channel(session.channel_id)
+    if not post_channel:
+        logger.warning("No se encontr\u00f3 el canal del ticket: %s", session.channel_id)
+    elif not isinstance(post_channel, discord.TextChannel):
+        logger.warning("El canal del ticket no es TextChannel: %s", session.channel_id)
+    elif not post_channel.permissions_for(guild.me).send_messages:
+        logger.warning("Bot sin permisos de env\u00edo en ticket %s", post_channel.id)
+    else:
         try:
             await post_channel.send(plantilla_post)
         except Exception as e:
             logger.error("Error enviando plantilla a canal postulaci\u00f3n: %s", e)
+
+    err_channel = bot.get_channel(postulacion_config_cache["errores_channel_id"]) if postulacion_config_cache["errores_channel_id"] else None
 
     if err_channel and isinstance(err_channel, discord.TextChannel):
         try:
@@ -292,6 +332,7 @@ async def finalizar_entrevista(session: InterviewSession):
             embed.add_field(name="Resultado", value=f"APROBADO ({resultado['errores']} errores)", inline=False)
             embed.add_field(name="Intento", value=str(session.intento), inline=True)
             embed.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
+            _agregar_preguntas_al_embed(embed, session)
             try:
                 await log_channel.send(embed=embed)
             except Exception as e:
@@ -327,6 +368,7 @@ async def finalizar_entrevista(session: InterviewSession):
             embed.add_field(name="Resultado", value=f"NO APROBADO ({resultado['errores']} errores)", inline=False)
             embed.add_field(name="Intento", value=f"{session.intento}/{entrevistas_db.MAX_INTENTOS}", inline=True)
             embed.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
+            _agregar_preguntas_al_embed(embed, session)
             try:
                 await log_channel.send(embed=embed)
             except Exception as e:
@@ -516,6 +558,8 @@ class QuestionView(View):
         self.session = session
 
     async def on_timeout(self):
+        if active_interviews.get(self.session.user_id) is not self.session:
+            return
         active_interviews.pop(self.session.user_id, None)
         logger.info(
             "Entrevista expirada por timeout: user=%s staff=%s",
@@ -667,6 +711,7 @@ class PreguntaSelect(discord.ui.Select):
                 )
             )
         placeholder = "Selecciona una pregunta para editar..." if mode == "editar" else "Selecciona una pregunta para eliminar..."
+        options = options[:25]
         super().__init__(
             placeholder=placeholder,
             min_values=1,
