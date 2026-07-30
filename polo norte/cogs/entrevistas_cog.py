@@ -691,8 +691,61 @@ class CategoriaSelect(discord.ui.Select):
 class PreguntaSelectView(View):
     def __init__(self, preguntas: list[dict], mode: str):
         super().__init__(timeout=120)
+        self.preguntas = preguntas
         self.mode = mode
-        self.add_item(PreguntaSelect(preguntas, mode))
+        self.page = 0
+        self.page_size = 25
+        self.total_pages = max(1, (len(preguntas) + self.page_size - 1) // self.page_size)
+        self._refresh()
+
+    def _get_page_preguntas(self) -> list[dict]:
+        start = self.page * self.page_size
+        end = min(start + self.page_size, len(self.preguntas))
+        return self.preguntas[start:end]
+
+    def _page_info(self) -> str:
+        total = len(self.preguntas)
+        start = self.page * self.page_size
+        end = min(start + self.page_size, total)
+        return f"P\u00e1gina {self.page + 1}/{self.total_pages} \u2014 Mostrando preguntas {start + 1}\u2013{end} de {total}"
+
+    def _refresh(self):
+        self.clear_items()
+        page_preguntas = self._get_page_preguntas()
+        self.add_item(PreguntaSelect(page_preguntas, self.mode))
+
+        prev = discord.ui.Button(
+            label="\u25c0\ufe0e Anterior", style=discord.ButtonStyle.secondary,
+            disabled=self.page == 0, row=2,
+        )
+        prev.callback = self._prev_page
+        self.add_item(prev)
+
+        next = discord.ui.Button(
+            label="Siguiente \u25b6\ufe0e", style=discord.ButtonStyle.secondary,
+            disabled=self.page >= self.total_pages - 1, row=2,
+        )
+        next.callback = self._next_page
+        self.add_item(next)
+
+    async def _prev_page(self, interaction: discord.Interaction):
+        self.page -= 1
+        self._refresh()
+        await interaction.response.edit_message(
+            content=self._mensaje_base, view=self,
+        )
+
+    async def _next_page(self, interaction: discord.Interaction):
+        self.page += 1
+        self._refresh()
+        await interaction.response.edit_message(
+            content=self._mensaje_base, view=self,
+        )
+
+    @property
+    def _mensaje_base(self) -> str:
+        accion = "editar" if self.mode == "editar" else "eliminar"
+        return f"Selecciona la pregunta que deseas {accion}:\n{self._page_info()}"
 
 
 class PreguntaSelect(discord.ui.Select):
@@ -711,7 +764,6 @@ class PreguntaSelect(discord.ui.Select):
                 )
             )
         placeholder = "Selecciona una pregunta para editar..." if mode == "editar" else "Selecciona una pregunta para eliminar..."
-        options = options[:25]
         super().__init__(
             placeholder=placeholder,
             min_values=1,
@@ -862,9 +914,10 @@ class ConfigPreguntasGroup(app_commands.Group):
             )
             return
 
+        view = PreguntaSelectView(preguntas, mode="editar")
         await interaction.response.send_message(
-            "Selecciona la pregunta que deseas editar:",
-            view=PreguntaSelectView(preguntas, mode="editar"),
+            view._mensaje_base,
+            view=view,
             ephemeral=True,
         )
 
@@ -884,9 +937,10 @@ class ConfigPreguntasGroup(app_commands.Group):
             )
             return
 
+        view = PreguntaSelectView(preguntas, mode="eliminar")
         await interaction.response.send_message(
-            "Selecciona la pregunta que deseas eliminar:",
-            view=PreguntaSelectView(preguntas, mode="eliminar"),
+            view._mensaje_base,
+            view=view,
             ephemeral=True,
         )
 
