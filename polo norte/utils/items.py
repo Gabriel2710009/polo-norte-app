@@ -1,12 +1,4 @@
-# ALLOWED CATEGORIES:
-# - Food / consumables
-# - Radio / communication devices
-# - Authorized tasers
-
-# Every item not in ALLOWED_ITEMS is unauthorized
-
 ALLOWED_ITEMS = {
-    # ── Food / consumables ──
     "sandwich", "water", "chocolate", "roscon", "polvoron", "turron",
     "coquito", "supervodka", "ballbarry_cupcake", "cupcake",
     "bread", "cheese", "apple", "banana", "orange", "pizza",
@@ -14,16 +6,12 @@ ALLOWED_ITEMS = {
     "soda", "coffee", "tea", "beer", "wine", "whisky", "vodka",
     "tacos", "burrito", "nachos", "popcorn", "icecream",
 
-    # ── Radio / communication devices ──
     "radio", "walkie", "walkietalkie", "walkie_talkie",
 
-    # ── Authorized tasers ──
     "weapon_stungun", "stungun", "taser", "weapon_taser",
 
-    # ── Medical ──
     "medikit",
 
-    # ── Money ──
     "money",
 }
 

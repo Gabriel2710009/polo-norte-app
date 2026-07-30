@@ -61,7 +61,7 @@ def save_aprobar_config(config):
 DEFAULT_BIENVENIDA_MENSAJE = (
     "Nombre IC:\n"
     "Numero IC:\n"
-    "IBAN IC: (número de cuenta de banco)\n"
+    "IBAN IC: (n\u00famero de cuenta de banco)\n"
     "Steam URL/Nombre:\n"
     "\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
     "\n"
@@ -74,13 +74,13 @@ DEFAULT_BIENVENIDA_MENSAJE = (
     "* Copiar \"trabajaste un total de ...\" y pegar en aviso de horas.\n"
     "  https://discord.com/channels/1305788361679573022/1307624129335398409\n"
     "\n"
-    "* Restar/sumar horas (también lo tienes que sumar/restar en el mensaje de aviso de horas).\n"
+    "* Restar/sumar horas (tambi\u00e9n lo tienes que sumar/restar en el mensaje de aviso de horas).\n"
     "  https://discord.com/channels/1305788361679573022/1307624192631377970\n"
     "\n"
-    "* Si no puedes realizar las horas pedir inactividad con antelación.\n"
+    "* Si no puedes realizar las horas pedir inactividad con antelaci\u00f3n.\n"
     "  https://discord.com/channels/1305788361679573022/1307627066576867328\n"
     "\n"
-    "* Apuntar ventas después de vender.\n"
+    "* Apuntar ventas despu\u00e9s de vender.\n"
     "  https://discord.com/channels/1305788361679573022/1305968451235614720\n"
     "\n"
     "* Restar ventas.\n"
@@ -89,7 +89,7 @@ DEFAULT_BIENVENIDA_MENSAJE = (
     "* Leer un poco el canal de anuncios antes de trabajar.\n"
     "  https://discord.com/channels/1305788361679573022/1307626015320838204\n"
     "\n"
-    "Cualquier duda podéis contactar con los <@&1306124327896481804> y con los <@&1306129434172198932> por vuestro canal privado podéis preguntar e informar lo que sea necesario."
+    "Cualquier duda pod\u00e9is contactar con los <@&1306124327896481804> y con los <@&1306129434172198932> por vuestro canal privado pod\u00e9is preguntar e informar lo que sea necesario."
 )
 
 BIENVENIDA_CONFIG_FILE = "config_bienvenida.json"
@@ -99,5 +99,3 @@ def load_bienvenida_config():
 
 def save_bienvenida_config(config):
     return _save_json(BIENVENIDA_CONFIG_FILE, config)
-
-# Punto de despliegue

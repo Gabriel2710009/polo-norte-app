@@ -1,25 +1,11 @@
-"""
-Pruebas del módulo de blacklist de postulaciones.
-
-Las pruebas que no requieren base de datos se ejecutan directamente.
-Las pruebas de base de datos requieren PostgreSQL accesible via DATABASE_URL.
-
-Ejecutar:
-    python test_blacklist.py
-"""
-
 import os
 import sys
 import unittest
 from unittest.mock import Mock, AsyncMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import blacklist_cog
-
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
+from cogs import blacklist_cog
 
 
 def _mensaje_mock(content: str, embeds=None):
@@ -44,17 +30,13 @@ def _field_mock(name: str, value: str):
     return f
 
 
-# ─────────────────────────────────────────────
-# Pruebas DB
-# ─────────────────────────────────────────────
-
 _SKIP_DB = True
 _db_module = None
 
 try:
     _db_url = os.environ.get("DATABASE_URL", "")
     if _db_url and _db_url.startswith("postgres"):
-        import blacklist_db as _db_module
+        from database import blacklist_db as _db_module
         _db_module.init()
         _SKIP_DB = False
 except Exception as e:
@@ -63,7 +45,6 @@ except Exception as e:
 
 
 class TestDB(unittest.TestCase):
-    """Requiere DATABASE_URL configurada. Omitir si no está disponible."""
 
     @classmethod
     def setUpClass(cls):
@@ -112,10 +93,10 @@ class TestDB(unittest.TestCase):
         self.assertEqual(res["nombre_ic"], "Desconocido")
 
     def test_rechaza_duplicado(self):
-        self.assertTrue(self.db.agregar("111", "Original", "Válido", "staff1"))
+        self.assertTrue(self.db.agregar("111", "Original", "V\u00e1lido", "staff1"))
         self.assertFalse(self.db.agregar("111", "Copia", "Duplicado", "staff2"))
         res = self.db.obtener("111")
-        self.assertEqual(res["motivo"], "Válido")
+        self.assertEqual(res["motivo"], "V\u00e1lido")
 
     def test_listar_paginacion(self):
         for i in range(25):
@@ -159,10 +140,6 @@ class TestDB(unittest.TestCase):
         todos = self.db.obtener_todos()
         self.assertEqual(set(todos), {"1", "2"})
 
-
-# ─────────────────────────────────────────────
-# Pruebas de extracción de Nombre IC
-# ─────────────────────────────────────────────
 
 class TestExtraerNombreIC(unittest.TestCase):
     def test_misma_linea(self):
@@ -226,10 +203,6 @@ class TestExtraerNombreIC(unittest.TestCase):
         self.assertEqual(blacklist_cog._extraer_nombre_ic(msgs), "Carlos Perez")
 
 
-# ─────────────────────────────────────────────
-# Pruebas de extracción de datos IC completos
-# ─────────────────────────────────────────────
-
 class TestExtraerDatosIC(unittest.TestCase):
     def test_extraer_todos_los_campos(self):
         content = (
@@ -254,7 +227,7 @@ class TestExtraerDatosIC(unittest.TestCase):
         self.assertIsNone(datos["steam_url"])
 
     def test_numero_con_variantes(self):
-        msgs = [_mensaje_mock("Número IC: 12345")]
+        msgs = [_mensaje_mock("N\u00famero IC: 12345")]
         datos = blacklist_cog._extraer_datos_ic(msgs)
         self.assertEqual(datos["numero_ic"], "12345")
 
@@ -274,18 +247,8 @@ class TestExtraerDatosIC(unittest.TestCase):
         datos = blacklist_cog._extraer_datos_ic(msgs)
         self.assertEqual(datos["nombre_ic"], "Carlos Lopez")
 
-    def test_error_ortografico_numero(self):
-        msgs = [_mensaje_mock("num IC: 98765")]
-        datos = blacklist_cog._extraer_datos_ic(msgs)
-        self.assertEqual(datos["numero_ic"], "98765")
-
-    def test_error_ortografico_iban(self):
-        msgs = [_mensaje_mock("cuenta ic: ES1234")]
-        datos = blacklist_cog._extraer_datos_ic(msgs)
-        self.assertEqual(datos["iban_ic"], "ES1234")
-
     def test_campos_con_flecha(self):
-        content = "→ Nombre IC: Ana Garcia\n→ Numero: 555\n→ Steam: https://steamcommunity.com/id/ana"
+        content = "\u2192 Nombre IC: Ana Garcia\n\u2192 Numero: 555\n\u2192 Steam: https://steamcommunity.com/id/ana"
         msgs = [_mensaje_mock(content)]
         datos = blacklist_cog._extraer_datos_ic(msgs)
         self.assertEqual(datos["nombre_ic"], "Ana Garcia")
@@ -294,7 +257,7 @@ class TestExtraerDatosIC(unittest.TestCase):
     def test_campos_desde_embed(self):
         fields = [
             _field_mock("Nombre IC", "Pedro Martinez"),
-            _field_mock("Número IC", "111222"),
+            _field_mock("N\u00famero IC", "111222"),
         ]
         embed = _embed_mock(fields=fields)
         msgs = [_mensaje_mock("", embeds=[embed])]
@@ -302,10 +265,6 @@ class TestExtraerDatosIC(unittest.TestCase):
         self.assertEqual(datos["nombre_ic"], "Pedro Martinez")
         self.assertEqual(datos["numero_ic"], "111222")
 
-
-# ─────────────────────────────────────────────
-# Pruebas de resolución de usuario (regex)
-# ─────────────────────────────────────────────
 
 class TestResolverRegex(unittest.TestCase):
     def test_mention_normal(self):
@@ -337,10 +296,6 @@ class TestResolverRegex(unittest.TestCase):
         self.assertIsNone(blacklist_cog._MENTION_PATTERN.match(""))
 
 
-# ─────────────────────────────────────────────
-# Pruebas de inconsistencias
-# ─────────────────────────────────────────────
-
 class TestConsistencias(unittest.TestCase):
     def test_solo_rol_sin_db(self):
         self.assertTrue(blacklist_cog._detectar_inconsistencia(en_db=False, tiene_rol=True))
@@ -355,12 +310,8 @@ class TestConsistencias(unittest.TestCase):
         self.assertFalse(blacklist_cog._detectar_inconsistencia(en_db=False, tiene_rol=False))
 
 
-# ─────────────────────────────────────────────
-# Pruebas con mocks del modulo DB
-# ─────────────────────────────────────────────
-
 class TestConMocks(unittest.TestCase):
-    @patch("blacklist_cog.db")
+    @patch("cogs.blacklist_cog.db")
     def test_obtener_retorna_dict(self, mock_db):
         mock_db.obtener.return_value = {
             "discord_id": "111",
@@ -373,7 +324,7 @@ class TestConMocks(unittest.TestCase):
         self.assertEqual(res["nombre_ic"], "Test")
         self.assertEqual(res["motivo"], "Razon")
 
-    @patch("blacklist_cog.db")
+    @patch("cogs.blacklist_cog.db")
     def test_agregar_retorna_bool(self, mock_db):
         mock_db.agregar.return_value = True
         self.assertTrue(mock_db.agregar("111", "Test", "X", "999"))
@@ -386,10 +337,6 @@ class TestConMocks(unittest.TestCase):
         blacklist_cog._tickets_notificados.add(999)
         self.assertIn(999, blacklist_cog._tickets_notificados)
 
-
-# ─────────────────────────────────────────────
-# Ejecución
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=False)

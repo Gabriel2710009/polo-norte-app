@@ -1,29 +1,15 @@
-"""
-Escenarios de prueba - version simplificada con mocks altos.
-
-Escenarios:
-  1. check_ticket_blacklist con creador identificable -> notifica
-  2. check_ticket_blacklist con ticket ya notificado -> omite
-  3. check_ticket_blacklist con staff -> omite
-  4. check_ticket_blacklist sin creador -> no notifica
-  5. Limpieza de notificados antiguos
-  6. Persistencia entre reinicios
-  7. scan_open_tickets flujo completo
-"""
-
 import os
 import sys
 import asyncio
 import unittest
-from unittest.mock import Mock, AsyncMock, patch, PropertyMock
+from unittest.mock import Mock, AsyncMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import blacklist_cog
+from cogs import blacklist_cog
 
 
 class TestCheckTicketBlacklist(unittest.TestCase):
-    """Prueba la funcion centralizada con mocks de alto nivel."""
 
     @classmethod
     def setUpClass(cls):
@@ -56,17 +42,16 @@ class TestCheckTicketBlacklist(unittest.TestCase):
         return self.loop.run_until_complete(coro)
 
     def test_notifica_si_creador_en_blacklist(self):
-        """Creador identificable y en DB -> notifica."""
-        with patch("blacklist_cog._identificar_creador", return_value=111):
+        with patch("cogs.blacklist_cog._identificar_creador", return_value=111):
             with patch.object(self.canal.guild, "get_member", return_value=Mock(id=111, mention="<@111>")):
-                with patch("blacklist_cog._es_staff", return_value=False):
-                    with patch("blacklist_cog.db.obtener", return_value={
+                with patch("cogs.blacklist_cog._es_staff", return_value=False):
+                    with patch("cogs.blacklist_cog.db.obtener", return_value={
                         "discord_id": "111", "nombre_ic": "Test",
                         "motivo": "Scam", "staff_id": "999", "fecha": "2026-01-01",
                     }):
-                        with patch("blacklist_cog.db.registrar_intento"):
-                            with patch("blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
-                                with patch("blacklist_cog.log_actions.log_info"):
+                        with patch("cogs.blacklist_cog.db.registrar_intento"):
+                            with patch("cogs.blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
+                                with patch("cogs.blacklist_cog.log_actions.log_info"):
                                     ok = self._run(
                                         blacklist_cog.check_ticket_blacklist(
                                             self.canal, self.bot, origen="test"
@@ -76,9 +61,8 @@ class TestCheckTicketBlacklist(unittest.TestCase):
                                     notify.assert_awaited_once()
 
     def test_omite_si_ya_notificado(self):
-        """Ticket en _tickets_notificados -> no hace nada."""
         blacklist_cog._tickets_notificados.add(5001)
-        with patch("blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
+        with patch("cogs.blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
             ok = self._run(
                 blacklist_cog.check_ticket_blacklist(self.canal, self.bot, origen="test")
             )
@@ -86,11 +70,10 @@ class TestCheckTicketBlacklist(unittest.TestCase):
             notify.assert_not_called()
 
     def test_omite_si_es_staff(self):
-        """Creador es staff -> bypass."""
-        with patch("blacklist_cog._identificar_creador", return_value=111):
+        with patch("cogs.blacklist_cog._identificar_creador", return_value=111):
             with patch.object(self.canal.guild, "get_member", return_value=Mock(id=111)):
-                with patch("blacklist_cog._es_staff", return_value=True):
-                    with patch("blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
+                with patch("cogs.blacklist_cog._es_staff", return_value=True):
+                    with patch("cogs.blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
                         ok = self._run(
                             blacklist_cog.check_ticket_blacklist(
                                 self.canal, self.bot, origen="test"
@@ -100,13 +83,12 @@ class TestCheckTicketBlacklist(unittest.TestCase):
                         notify.assert_not_called()
 
     def test_no_notifica_sin_creador(self):
-        """No se pudo identificar creador -> no notifica."""
-        with patch("blacklist_cog._identificar_creador", return_value=None):
+        with patch("cogs.blacklist_cog._identificar_creador", return_value=None):
             with patch.object(self.canal, "history") as mock_hist:
                 mock_hist.return_value.__aiter__.return_value = iter([])
                 with patch.object(self.canal.guild, "audit_logs") as mock_audit:
                     mock_audit.return_value.__aiter__.return_value = iter([])
-                    with patch("blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
+                    with patch("cogs.blacklist_cog._notificar_blacklist", new_callable=AsyncMock) as notify:
                         ok = self._run(
                             blacklist_cog.check_ticket_blacklist(
                                 self.canal, self.bot, origen="test"
@@ -117,7 +99,6 @@ class TestCheckTicketBlacklist(unittest.TestCase):
 
 
 class TestLimpieza(unittest.TestCase):
-    """Prueba la limpieza de canales que ya no existen."""
 
     @classmethod
     def setUpClass(cls):
@@ -139,7 +120,7 @@ class TestLimpieza(unittest.TestCase):
         bot = Mock()
         bot.get_channel = Mock(side_effect=lambda cid: Mock(id=cid) if cid == 2 else None)
 
-        with patch("blacklist_cog._persistir_notificados") as persist:
+        with patch("cogs.blacklist_cog._persistir_notificados") as persist:
             self._run(blacklist_cog._limpiar_notificados_antiguos(bot))
             self.assertEqual(blacklist_cog._tickets_notificados, {2})
             persist.assert_called_once()
@@ -149,28 +130,25 @@ class TestLimpieza(unittest.TestCase):
         bot = Mock()
         bot.get_channel = Mock(return_value=Mock(id=1))
 
-        with patch("blacklist_cog._persistir_notificados") as persist:
+        with patch("cogs.blacklist_cog._persistir_notificados") as persist:
             self._run(blacklist_cog._limpiar_notificados_antiguos(bot))
             self.assertEqual(blacklist_cog._tickets_notificados, {1})
             persist.assert_not_called()
 
     def test_set_vacio_no_hace_nada(self):
         bot = Mock()
-        with patch("blacklist_cog._persistir_notificados") as persist:
+        with patch("cogs.blacklist_cog._persistir_notificados") as persist:
             self._run(blacklist_cog._limpiar_notificados_antiguos(bot))
             persist.assert_not_called()
 
 
 class TestPersistencia(unittest.TestCase):
-    """Persistencia entre reinicios."""
 
     def setUp(self):
         blacklist_cog._tickets_notificados.clear()
         self._orig_file = blacklist_cog._NOTIFICADOS_FILE
-        self._tmp = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "data",
-            "_test_notificados.json",
-        )
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._tmp = os.path.join(base_dir, "data", "_test_notificados.json")
         blacklist_cog._NOTIFICADOS_FILE = self._tmp
         if os.path.exists(self._tmp):
             os.remove(self._tmp)
@@ -198,12 +176,10 @@ class TestPersistencia(unittest.TestCase):
         with open(self._tmp, "w") as f:
             f.write("{corrupto")
         blacklist_cog._cargar_notificados()
-        # No debe explotar, set debe quedar como estaba
         self.assertEqual(len(blacklist_cog._tickets_notificados), 0)
 
 
 class TestScanOpenTickets(unittest.TestCase):
-    """Prueba scan_open_tickets con mocks."""
 
     @classmethod
     def setUpClass(cls):
@@ -226,7 +202,6 @@ class TestScanOpenTickets(unittest.TestCase):
         return self.loop.run_until_complete(coro)
 
     def test_ejecuta_limpieza_y_escaneo(self):
-        """Verifica que scan llama a limpieza y check_ticket_blacklist."""
         bot = Mock()
         bot.wait_until_ready = AsyncMock()
         bot.guilds = []
@@ -244,10 +219,9 @@ class TestScanOpenTickets(unittest.TestCase):
 
         with patch.object(blacklist_cog, "_limpiar_notificados_antiguos", new_callable=AsyncMock) as clean:
             self._run(blacklist_cog.scan_open_tickets(bot))
-            clean.assert_awaited_once()  # limpieza se ejecuta siempre
+            clean.assert_awaited_once()
 
     def test_itera_guilds_y_canales(self):
-        """Crea guild mock con categoria y canales, verifica que check se llama."""
         categoria = Mock()
         categoria.channels = []
 
@@ -265,7 +239,6 @@ class TestScanOpenTickets(unittest.TestCase):
             guild.get_channel.assert_called_with(blacklist_cog.POSTULACIONES_CATEGORY_ID)
 
     def test_itera_canales_y_llama_check(self):
-        """Verifica que check_ticket_blacklist se llama para cada canal."""
         canal1 = Mock(spec=blacklist_cog.discord.TextChannel)
         canal1.id = 100
         canal1.category_id = 9999

@@ -7,31 +7,22 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import blacklist_db as db
-import log_actions
+from database import blacklist_db as db
+from services import log_actions
 
 logger = logging.getLogger("BlacklistCog")
 
-# ── Comportamiento ante fallo de PostgreSQL ──────────────────
-# Este módulo depende de PostgreSQL para verificar la blacklist.
-# Si la base de datos no responde (caída, timeout, error de red):
-#
-#   1. db.obtener() lanza excepción → capturada por try/except
-#   2. Se loguea el error (logger.error + log_actions si aplica)
-#   3. Si BLACKLIST_ALLOW_ROLE_FALLBACK=true (default):
-#        - Si el usuario tiene el rol de blacklist físico → se bloquea por rol
-#        - Si NO tiene el rol → el ticket se permite (fail open)
+# Comportamiento ante fallo de PostgreSQL:
+# Si la base de datos no responde:
+#   1. db.obtener() lanza excepción -> capturada por try/except
+#   2. Se loguea el error
+#   3. Si BLACKLIST_ALLOW_ROLE_FALLBACK=true:
+#        - Si el usuario tiene el rol de blacklist físico -> se bloquea por rol
+#        - Si NO tiene el rol -> el ticket se permite (fail open)
 #   4. Si BLACKLIST_ALLOW_ROLE_FALLBACK=false:
 #        - El ticket se permite siempre (fail open puro)
 #   5. db.registrar_intento() también protegido: falla silenciosa con log
 #   6. El listener nunca crashea; otros módulos del bot siguen funcionando
-#
-# Conclusión: con PostgreSQL estable + rol de respaldo habilitado,
-# el riesgo de que un blacklistado pase inadvertido es mínimo.
-# No se implementa caché local porque el fallback por rol cubre
-# el caso crítico y PostgreSQL en producción (Railway, AWS, etc.)
-# tiene alta disponibilidad.
-# ─────────────────────────────────────────────────────────────
 
 BLACKLIST_POSTULACIONES_ROLE_ID = 0
 BLACKLIST_LOG_CHANNEL_ID = 0
@@ -45,8 +36,6 @@ ROL_AUTORIZADO_ID = 1307612928211554386
 
 # Protección contra spam: canales ya notificados en esta sesión
 # Persistido a disco para sobrevivir reinicios.
-# Cargado al iniciar desde data/tickets_notificados.json y
-# guardado cada vez que se notifica un nuevo ticket.
 _tickets_notificados: set[int] = set()
 
 logger_scanner = logging.getLogger("BlacklistScanner")
@@ -75,16 +64,14 @@ def _cargar_notificados():
             data = json.load(f)
         _tickets_notificados.update(int(x) for x in data)
         logger_scanner.info(
-            "Notificados persistentes cargados: %s tickets (evitará duplicados)",
+            "Notificados persistentes cargados: %s tickets (evitar\u00e1 duplicados)",
             len(_tickets_notificados),
         )
     except Exception as e:
         logger.warning("Error cargando notificados persistentes: %s", e)
 
-# ── Permisos ──────────────────────────────
 
 def _es_staff(member: discord.Member) -> bool:
-    """True si el miembro tiene rol de staff, administrador, o bypass."""
     if member.guild_permissions.administrator:
         return True
     if member.guild_permissions.manage_roles:
@@ -106,28 +93,26 @@ def _detectar_inconsistencia(en_db: bool, tiene_rol: bool) -> bool:
     return (en_db and not tiene_rol) or (not en_db and tiene_rol)
 
 
-# ── Extracción de Datos IC ──────────────
-
 _PATRONES_NOMBRE_IC = [
-    re.compile(r"(?:→\s*)?nombre\s*(?:ic)?\s*:?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:→\s*)?nombre\s*(?:ic)?\s*:?\s*\n\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:→\s*)?nombre\s*(?:ic)?\s*:?\s*\n\s*\n\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?nombre\\s*(?:ic)?\\s*:?\\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?nombre\\s*(?:ic)?\\s*:?\\s*\\n\\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?nombre\\s*(?:ic)?\\s*:?\\s*\\n\\s*\\n\\s*(.+)", re.IGNORECASE),
 ]
 
 _PATRONES_NUMERO_IC = [
-    re.compile(r"(?:→\s*)?(?:n[úu]mero|num|nro|tel[eé]fono|cel|celular)\s*(?:ic)?\s*:?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:→\s*)?(?:n[úu]mero|num|nro|tel[eé]fono|cel|celular)\s*(?:ic)?\s*:?\s*\n\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?(?:n[\u00fau]mero|num|nro|tel[e\u00e9]fono|cel|celular)\\s*(?:ic)?\\s*:?\\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?(?:n[\u00fau]mero|num|nro|tel[e\u00e9]fono|cel|celular)\\s*(?:ic)?\\s*:?\\s*\\n\\s*(.+)", re.IGNORECASE),
 ]
 
 _PATRONES_IBAN_IC = [
-    re.compile(r"(?:→\s*)?(?:iban|cuenta|bank|banco|ibam|bban)\s*(?:ic)?\s*:?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:→\s*)?(?:iban|cuenta|bank|banco|ibam|bban)\s*(?:ic)?\s*:?\s*\n\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?(?:iban|cuenta|bank|banco|ibam|bban)\\s*(?:ic)?\\s*:?\\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?(?:iban|cuenta|bank|banco|ibam|bban)\\s*(?:ic)?\\s*:?\\s*\\n\\s*(.+)", re.IGNORECASE),
 ]
 
 _PATRONES_STEAM = [
-    re.compile(r"(?:→\s*)?(?:steam\s*(?:url|nombre|name|id)?|url\s*steam)\s*:?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:→\s*)?(?:steam\s*(?:url|nombre|name|id)?|url\s*steam)\s*:?\s*\n\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:https?://)?steamcommunity\.com/\S+", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?(?:steam\\s*(?:url|nombre|name|id)?|url\\s*steam)\\s*:?\\s*(.+)", re.IGNORECASE),
+    re.compile("(?:\u2192\\s*)?(?:steam\\s*(?:url|nombre|name|id)?|url\\s*steam)\\s*:?\\s*\\n\\s*(.+)", re.IGNORECASE),
+    re.compile("(?:https?://)?steamcommunity\\.com/\\S+", re.IGNORECASE),
 ]
 
 
@@ -184,26 +169,24 @@ async def _obtener_mensajes_ticket(channel: discord.TextChannel, limite: int = 5
     return mensajes
 
 
-# ── Notificación ──────────────────────────
-
 async def _notificar_blacklist(channel: discord.TextChannel, registro: dict, usuario: discord.Member):
     embed = discord.Embed(
-        title="\U0001f6ab Postulación bloqueada",
+        title="\U0001f6ab Postulaci\u00f3n bloqueada",
         description=(
-            "No puedes realizar una postulación en este momento.\n\n"
+            "No puedes realizar una postulaci\u00f3n en este momento.\n\n"
             f"**Motivo:**\n{registro['motivo']}\n\n"
             "Si consideras que se da un error, contacta con un miembro "
             "del equipo de entrevistadores."
         ),
         color=discord.Color.red(),
     )
-    embed.set_footer(text="Este ticket deberá ser revisado y cerrado por el equipo correspondiente.")
+    embed.set_footer(text="Este ticket deber\u00e1 ser revisado y cerrado por el equipo correspondiente.")
     try:
         await channel.send(embed=embed)
     except Exception as e:
-        logger.error("Error enviando notificación de blacklist a %s: %s", channel.id, e)
+        logger.error("Error enviando notificaci\u00f3n de blacklist a %s: %s", channel.id, e)
         await log_actions.log_error(
-            "\U0001f6ab Error notificación blacklist",
+            "\U0001f6ab Error notificaci\u00f3n blacklist",
             f"No se pudo enviar embed a <#{channel.id}>: `{e}`",
         )
 
@@ -229,9 +212,7 @@ async def _enviar_embed_log(bot: commands.Bot, embed: discord.Embed):
         )
 
 
-# ── IC Modal / View ───────────────────────
-
-class ICModal(discord.ui.Modal, title="Información IC del usuario"):
+class ICModal(discord.ui.Modal, title="Informaci\u00f3n IC del usuario"):
     nombre_ic = discord.ui.TextInput(
         label="Nombre IC",
         placeholder="Fatido Rodriguez",
@@ -239,7 +220,7 @@ class ICModal(discord.ui.Modal, title="Información IC del usuario"):
         required=True,
     )
     numero_ic = discord.ui.TextInput(
-        label="Número IC",
+        label="N\u00famero IC",
         placeholder="4809639162",
         max_length=50,
         required=False,
@@ -264,7 +245,7 @@ class ICModal(discord.ui.Modal, title="Información IC del usuario"):
     async def on_submit(self, interaction: discord.Interaction):
         nombre_ic = self.nombre_ic.value.strip()
         if not nombre_ic:
-            await interaction.response.send_message("❌ El nombre IC es obligatorio.", ephemeral=True)
+            await interaction.response.send_message("\u274c El nombre IC es obligatorio.", ephemeral=True)
             return
         numero_ic = self.numero_ic.value.strip() or None
         iban_ic = self.iban_ic.value.strip() or None
@@ -288,17 +269,17 @@ class ICView(discord.ui.View):
         super().__init__(timeout=300)
         self.ctx = ctx
 
-    @discord.ui.button(label="📝 Completar IC", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="\U0001f4dd Completar IC", style=discord.ButtonStyle.primary)
     async def completar_ic(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if interaction.user.id != self.ctx["staff_id"]:
-            await interaction.response.send_message("❌ Solo quien ejecutó el comando puede completar el IC.", ephemeral=True)
+            await interaction.response.send_message("\u274c Solo quien ejecut\u00f3 el comando puede completar el IC.", ephemeral=True)
             return
         await interaction.response.send_modal(ICModal(self.ctx))
 
-    @discord.ui.button(label="❌ Desconozco", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="\u274c Desconozco", style=discord.ButtonStyle.secondary)
     async def desconozco(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if interaction.user.id != self.ctx["staff_id"]:
-            await interaction.response.send_message("❌ Solo quien ejecutó el comando puede hacer esto.", ephemeral=True)
+            await interaction.response.send_message("\u274c Solo quien ejecut\u00f3 el comando puede hacer esto.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         await _ejecutar_blacklist(
@@ -309,8 +290,6 @@ class ICView(discord.ui.View):
             nombre_ic="Desconocido",
         )
 
-
-# ── Blacklist execution ──────────────────
 
 async def _ejecutar_blacklist(
     interaction: discord.Interaction,
@@ -323,7 +302,6 @@ async def _ejecutar_blacklist(
     iban_ic: str = None,
     steam_url: str = None,
 ):
-    """Crea la blacklist en DB, asigna rol y envía embeds."""
     bot = interaction.client
     guild = interaction.guild
 
@@ -385,7 +363,7 @@ async def _ejecutar_blacklist(
     )
     embed.add_field(name="Nombre IC", value=nombre_ic, inline=True)
     if numero_ic:
-        embed.add_field(name="Número IC", value=numero_ic, inline=True)
+        embed.add_field(name="N\u00famero IC", value=numero_ic, inline=True)
     if iban_ic:
         embed.add_field(name="IBAN IC", value=iban_ic, inline=True)
     if steam_url:
@@ -397,9 +375,9 @@ async def _ejecutar_blacklist(
     if ticket_origen_encontrado:
         embed.add_field(name="Ticket origen", value=f"<#{ticket_origen_encontrado}>", inline=True)
     if not rol_ok:
-        embed.add_field(name="\u26a0\ufe0f Rol", value="No se pudo asignar (revisar jerarquía).", inline=False)
+        embed.add_field(name="\u26a0\ufe0f Rol", value="No se pudo asignar (revisar jerarqu\u00eda).", inline=False)
     elif not es_member:
-        embed.add_field(name="\u2139\ufe0f Rol", value="Usuario no está en el servidor. Solo se registró en DB.", inline=False)
+        embed.add_field(name="\u2139\ufe0f Rol", value="Usuario no est\u00e1 en el servidor. Solo se registr\u00f3 en DB.", inline=False)
     embed.set_footer(text=f"ID: {uid}")
 
     await _enviar_embed_log(bot, embed)
@@ -414,7 +392,7 @@ async def _ejecutar_blacklist(
 
     if not es_member:
         await interaction.followup.send(
-            "\u2705 Blacklist aplicada en DB. El usuario no está en el servidor, no se asignó rol.",
+            "\u2705 Blacklist aplicada en DB. El usuario no est\u00e1 en el servidor, no se asign\u00f3 rol.",
             ephemeral=True,
         )
     elif rol_ok:
@@ -422,18 +400,14 @@ async def _ejecutar_blacklist(
     else:
         await interaction.followup.send(
             "\u26a0\ufe0f Blacklist aplicada en DB, pero **no se pudo asignar el rol**."
-            " Revisá la jerarquía del bot.",
+            " Revis\u00e1 la jerarqu\u00eda del bot.",
             ephemeral=True,
         )
 
 
-# ── Eliminar mensajes de blacklist ────────
-
 async def _borrar_mensajes_blacklist(bot, guild: discord.Guild, uid: str, ticket_origen_id: str = None):
-    """Busca y elimina mensajes de notificación de blacklist en tickets y logs."""
     eliminados = 0
 
-    # 1. Ticket origen
     if ticket_origen_id:
         channel = bot.get_channel(int(ticket_origen_id))
         if channel and isinstance(channel, discord.TextChannel):
@@ -449,7 +423,6 @@ async def _borrar_mensajes_blacklist(bot, guild: discord.Guild, uid: str, ticket
             except Exception as e:
                 logger.warning("Error borrando mensajes en ticket %s: %s", channel.id, e)
 
-    # 2. Log channel
     log_channel = bot.get_channel(BLACKLIST_LOG_CHANNEL_ID)
     if log_channel and isinstance(log_channel, discord.TextChannel):
         try:
@@ -463,7 +436,6 @@ async def _borrar_mensajes_blacklist(bot, guild: discord.Guild, uid: str, ticket
         except Exception as e:
             logger.warning("Error borrando mensajes en log %s: %s", log_channel.id, e)
 
-    # 3. Canales de la categoría de postulaciones
     categoria = guild.get_channel(POSTULACIONES_CATEGORY_ID)
     if categoria:
         for channel in categoria.channels:
@@ -487,19 +459,11 @@ async def _borrar_mensajes_blacklist(bot, guild: discord.Guild, uid: str, ticket
         logger.info("Mensajes de blacklist eliminados: %s para UID %s", eliminados, uid)
 
 
-# ── Resolución de usuario ─────────────────
-
 _ID_PATTERN = re.compile(r"^(\d{17,20})$")
 _MENTION_PATTERN = re.compile(r"^<@!?(\d{17,20})>$")
 
 
 async def _resolver_usuario(interaction: discord.Interaction, texto: str):
-    """
-    Convierte una mención o ID de Discord en (discord_id_str, usuario_obj, error_msg).
-
-    - texto: '@usuario', '<@123>', '<@!123>' o '123456789'
-    - Retorna (id_str, Member|User|None, error_str|None)
-    """
     texto = texto.strip()
 
     m = _MENTION_PATTERN.match(texto)
@@ -509,7 +473,7 @@ async def _resolver_usuario(interaction: discord.Interaction, texto: str):
         m = _ID_PATTERN.match(texto)
         if not m:
             return None, None, (
-                "Formato inválido. Usá una mención (@Usuario) o un ID numérico de Discord.\n"
+                "Formato inv\u00e1lido. Us\u00e1 una menci\u00f3n (@Usuario) o un ID num\u00e9rico de Discord.\n"
                 "Ejemplo: `/blacklist 1389546682076631141 motivo`"
             )
         discord_id = m.group(1)
@@ -517,7 +481,6 @@ async def _resolver_usuario(interaction: discord.Interaction, texto: str):
     usuario = None
     guild = interaction.guild
 
-    # Intentar resolver como Member (dentro del servidor)
     if guild:
         usuario = guild.get_member(int(discord_id))
         if not usuario:
@@ -528,14 +491,13 @@ async def _resolver_usuario(interaction: discord.Interaction, texto: str):
             except (discord.HTTPException, discord.Forbidden):
                 pass
 
-    # Resolver como User global (fuera del servidor)
     if not usuario:
         try:
             usuario = await interaction.client.fetch_user(int(discord_id))
         except discord.NotFound:
             return discord_id, None, (
-                "No se encontró un usuario de Discord con ese ID.\n"
-                "Verificá que el ID sea correcto e intentá de nuevo."
+                "No se encontr\u00f3 un usuario de Discord con ese ID.\n"
+                "Verific\u00e1 que el ID sea correcto e intent\u00e1 de nuevo."
             )
         except (discord.HTTPException, discord.Forbidden) as e:
             return discord_id, None, f"Error al verificar el ID: {e}"
@@ -543,18 +505,14 @@ async def _resolver_usuario(interaction: discord.Interaction, texto: str):
     return discord_id, usuario, None
 
 
-# ── Comandos ──────────────────────────────
-
 ENTRIES_PER_PAGE = 10
 
 
 def _setup_blacklist_commands(bot: commands.Bot):
 
-    # ── /blacklist ──────────────────────────
-
     @bot.tree.command(name="blacklist", description="Agrega un usuario a la blacklist de postulaciones")
     @app_commands.describe(
-        usuario="Mención (@Usuario) o Discord ID del usuario a blacklistear",
+        usuario="Menci\u00f3n (@Usuario) o Discord ID del usuario a blacklistear",
         motivo="Motivo de la blacklist",
     )
     async def blacklist(interaction: discord.Interaction, usuario: str, motivo: str):
@@ -563,7 +521,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
             return
 
         if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-            await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+            await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
             return
 
         discord_id, usuario_obj, error = await _resolver_usuario(interaction, usuario)
@@ -576,7 +534,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
         existente = db.obtener(uid)
         if existente:
             embed = discord.Embed(
-                title="\u26a0\ufe0f Usuario ya está en blacklist",
+                title="\u26a0\ufe0f Usuario ya est\u00e1 en blacklist",
                 color=discord.Color.orange(),
                 timestamp=discord.utils.utcnow(),
             )
@@ -588,16 +546,15 @@ def _setup_blacklist_commands(bot: commands.Bot):
             if existente.get("ticket_origen_id"):
                 embed.add_field(name="Ticket origen", value=f"<#{existente['ticket_origen_id']}>", inline=True)
             if existente.get("numero_ic"):
-                embed.add_field(name="Número IC", value=existente["numero_ic"], inline=True)
+                embed.add_field(name="N\u00famero IC", value=existente["numero_ic"], inline=True)
             if existente.get("iban_ic"):
                 embed.add_field(name="IBAN IC", value=existente["iban_ic"], inline=True)
             if existente.get("steam_url"):
                 embed.add_field(name="Steam", value=existente["steam_url"], inline=False)
-            embed.set_footer(text="Usá /unblacklist para remover o /blacklist-info para detalles")
+            embed.set_footer(text="Us\u00e1 /unblacklist para remover o /blacklist-info para detalles")
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        # ── Intentar extraer IC del canal actual ──
         nombre_ic = None
         ticket_origen_id = None
         datos_ic = {}
@@ -634,7 +591,6 @@ def _setup_blacklist_commands(bot: commands.Bot):
             )
             return
 
-        # ── No se encontró IC ── preguntar al staff ──
         ctx = {
             "uid": uid,
             "usuario_obj": usuario_obj,
@@ -643,28 +599,26 @@ def _setup_blacklist_commands(bot: commands.Bot):
         }
         view = ICView(ctx)
         await interaction.response.send_message(
-            "\u2139\ufe0f No se encontró información IC automáticamente.\n\n"
-            "Podés **completar los datos IC** manualmente o indicar que **desconocés** el nombre IC.\n\n"
+            "\u2139\ufe0f No se encontr\u00f3 informaci\u00f3n IC autom\u00e1ticamente.\n\n"
+            "Pod\u00e9s **completar los datos IC** manualmente o indicar que **desconoc\u00e9s** el nombre IC.\n\n"
             "Formato esperado:\n"
-            "• **Nombre IC** (obligatorio)\n"
-            "• Número IC\n"
-            "• IBAN IC (cuenta bancaria)\n"
-            "• Steam URL / Nombre",
+            "\u2022 **Nombre IC** (obligatorio)\n"
+            "\u2022 N\u00famero IC\n"
+            "\u2022 IBAN IC (cuenta bancaria)\n"
+            "\u2022 Steam URL / Nombre",
             view=view,
             ephemeral=True,
         )
 
-    # ── /unblacklist ────────────────────────
-
     @bot.tree.command(name="unblacklist", description="Quita un usuario de la blacklist de postulaciones")
-    @app_commands.describe(usuario="Mención (@Usuario) o Discord ID del usuario a desblacklistear")
+    @app_commands.describe(usuario="Menci\u00f3n (@Usuario) o Discord ID del usuario a desblacklistear")
     async def unblacklist(interaction: discord.Interaction, usuario: str):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
 
         if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-            await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+            await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
             return
 
         discord_id, usuario_obj, error = await _resolver_usuario(interaction, usuario)
@@ -698,7 +652,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
 
         if not eliminado and not tenia_rol:
             await interaction.followup.send(
-                f"\u26a0\ufe0f <@{uid}> no estaba en blacklist ni tenía el rol.", ephemeral=True,
+                f"\u26a0\ufe0f <@{uid}> no estaba en blacklist ni ten\u00eda el rol.", ephemeral=True,
             )
             return
 
@@ -716,9 +670,9 @@ def _setup_blacklist_commands(bot: commands.Bot):
         embed_log.add_field(name="Fecha", value=discord.utils.utcnow().strftime("%d/%m/%Y %H:%M UTC"), inline=True)
         embed_log.add_field(name="Motivo original", value=motivo_original, inline=False)
         if not eliminado:
-            embed_log.add_field(name="\u26a0\ufe0f Nota", value="Solo se removió el rol (no estaba en DB).", inline=False)
+            embed_log.add_field(name="\u26a0\ufe0f Nota", value="Solo se removi\u00f3 el rol (no estaba en DB).", inline=False)
         if not rol_ok:
-            embed_log.add_field(name="\u26a0\ufe0f Rol", value="No se pudo remover (revisar jerarquía).", inline=False)
+            embed_log.add_field(name="\u26a0\ufe0f Rol", value="No se pudo remover (revisar jerarqu\u00eda).", inline=False)
         embed_log.set_footer(text=f"ID: {uid}")
 
         await _enviar_embed_log(bot, embed_log)
@@ -731,23 +685,20 @@ def _setup_blacklist_commands(bot: commands.Bot):
             f"**Staff:** {interaction.user} (`{interaction.user.id}`)",
         )
 
-        # ── Borrar mensajes de blacklist ──
         ticket_origen = (registro_previo or {}).get("ticket_origen_id")
         await _borrar_mensajes_blacklist(bot, interaction.guild, uid, ticket_origen)
 
         await interaction.followup.send(f"\u2705 <@{uid}> procesado.", ephemeral=True)
 
-    # ── /blacklist-info ─────────────────────
-
-    @bot.tree.command(name="blacklist-info", description="Muestra información de blacklist de un usuario")
-    @app_commands.describe(usuario="Mención (@Usuario) o Discord ID del usuario a consultar")
+    @bot.tree.command(name="blacklist-info", description="Muestra informaci\u00f3n de blacklist de un usuario")
+    @app_commands.describe(usuario="Menci\u00f3n (@Usuario) o Discord ID del usuario a consultar")
     async def blacklist_info(interaction: discord.Interaction, usuario: str):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
 
         if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-            await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+            await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
             return
 
         discord_id, usuario_obj, error = await _resolver_usuario(interaction, usuario)
@@ -765,7 +716,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                 tiene_rol = True
 
         embed = discord.Embed(
-            title="\U0001f6ab Información de Blacklist",
+            title="\U0001f6ab Informaci\u00f3n de Blacklist",
             color=discord.Color.red() if registro else discord.Color.green(),
             timestamp=discord.utils.utcnow(),
         )
@@ -773,7 +724,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
         if registro:
             embed.add_field(name="Nombre IC", value=registro["nombre_ic"], inline=True)
             if registro.get("numero_ic"):
-                embed.add_field(name="Número IC", value=registro["numero_ic"], inline=True)
+                embed.add_field(name="N\u00famero IC", value=registro["numero_ic"], inline=True)
             if registro.get("iban_ic"):
                 embed.add_field(name="IBAN IC", value=registro["iban_ic"], inline=True)
             if registro.get("steam_url"):
@@ -791,22 +742,20 @@ def _setup_blacklist_commands(bot: commands.Bot):
                 estado += " \u26a0\ufe0f (sin rol - inconsistencia)"
             embed.add_field(name="Estado", value=estado, inline=False)
         else:
-            embed.description = f"<@{uid}> **no** está en la blacklist de postulaciones."
+            embed.description = f"<@{uid}> **no** est\u00e1 en la blacklist de postulaciones."
             if tiene_rol:
                 embed.description += "\n\n\u26a0\ufe0f Sin embargo, tiene el rol de blacklist asignado (inconsistencia)."
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── /blacklist-list ─────────────────────
-
-    @bot.tree.command(name="blacklist-list", description="Lista blacklist activas con paginación")
-    @app_commands.describe(pagina="Número de página (default: 1)")
+    @bot.tree.command(name="blacklist-list", description="Lista blacklist activas con paginaci\u00f3n")
+    @app_commands.describe(pagina="N\u00famero de p\u00e1gina (default: 1)")
     async def blacklist_list(interaction: discord.Interaction, pagina: int = 1):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
         if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-            await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+            await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
             return
 
         pagina = max(pagina, 1)
@@ -834,10 +783,8 @@ def _setup_blacklist_commands(bot: commands.Bot):
                 inline=False,
             )
 
-        embed.set_footer(text=f"Página {pagina}/{total_paginas} — {total} registro(s)")
+        embed.set_footer(text=f"P\u00e1gina {pagina}/{total_paginas} \u2014 {total} registro(s)")
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ── /blacklist-search ───────────────────
 
     class SearchModal(discord.ui.Modal, title="\U0001f50d Buscar en Blacklist"):
         discord_id_input = discord.ui.TextInput(
@@ -858,7 +805,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                 await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
                 return
             if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-                await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+                await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
                 return
 
             discord_id = self.discord_id_input.value.strip() if self.discord_id_input.value else ""
@@ -884,13 +831,13 @@ def _setup_blacklist_commands(bot: commands.Bot):
             if len(resultados) == 1:
                 r = resultados[0]
                 embed = discord.Embed(
-                    title="\U0001f6ab Resultado de búsqueda",
+                    title="\U0001f6ab Resultado de b\u00fasqueda",
                     color=discord.Color.red(),
                     timestamp=discord.utils.utcnow(),
                 )
                 embed.add_field(name="Nombre IC", value=r["nombre_ic"], inline=True)
                 if r.get("numero_ic"):
-                    embed.add_field(name="Número IC", value=r["numero_ic"], inline=True)
+                    embed.add_field(name="N\u00famero IC", value=r["numero_ic"], inline=True)
                 if r.get("iban_ic"):
                     embed.add_field(name="IBAN IC", value=r["iban_ic"], inline=True)
                 if r.get("steam_url"):
@@ -912,10 +859,10 @@ def _setup_blacklist_commands(bot: commands.Bot):
 
             paginas = []
             for i, r in enumerate(resultados, 1):
-                paginas.append(f"{i}. **{r['nombre_ic']}** — `{r['discord_id']}` — {r['fecha'][:10]}")
+                paginas.append(f"{i}. **{r['nombre_ic']}** \u2014 `{r['discord_id']}` \u2014 {r['fecha'][:10]}")
 
             embed = discord.Embed(
-                title="\U0001f6ab Resultados de búsqueda",
+                title="\U0001f6ab Resultados de b\u00fasqueda",
                 color=discord.Color.blue(),
                 timestamp=discord.utils.utcnow(),
             )
@@ -930,29 +877,27 @@ def _setup_blacklist_commands(bot: commands.Bot):
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
         if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-            await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+            await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
             return
 
         await interaction.response.send_modal(SearchModal())
 
-    # ── /blacklist-sync ─────────────────────
-
     @bot.tree.command(name="blacklist-sync", description="Verifica y corrige inconsistencias entre DB y rol")
     @app_commands.describe(
-        accion="Qué hacer: 'revisar' (default) o 'corregir'",
+        accion="Qu\u00e9 hacer: 'revisar' (default) o 'corregir'",
     )
     async def blacklist_sync(interaction: discord.Interaction, accion: str = "revisar"):
         if not interaction.guild:
             await interaction.response.send_message("\u274c Solo puede usarse en un servidor.", ephemeral=True)
             return
         if not isinstance(interaction.user, discord.Member) or not _tiene_permiso(interaction.user):
-            await interaction.response.send_message("\u274c No tenés permisos.", ephemeral=True)
+            await interaction.response.send_message("\u274c No ten\u00e9s permisos.", ephemeral=True)
             return
 
         accion = accion.lower().strip()
         if accion not in ("revisar", "corregir"):
             await interaction.response.send_message(
-                "Usá `revisar` para solo ver inconsistencias o `corregir` para arreglarlas.", ephemeral=True,
+                "Us\u00e1 `revisar` para solo ver inconsistencias o `corregir` para arreglarlas.", ephemeral=True,
             )
             return
 
@@ -972,12 +917,12 @@ def _setup_blacklist_commands(bot: commands.Bot):
 
             if not faltan_rol and not sobran_rol:
                 await interaction.followup.send(
-                    "\u2705 **No hay inconsistencias.** DB y rol están sincronizados.", ephemeral=True,
+                    "\u2705 **No hay inconsistencias.** DB y rol est\u00e1n sincronizados.", ephemeral=True,
                 )
                 return
 
             embed = discord.Embed(
-                title="\U0001f6ab Sincronización de Blacklist",
+                title="\U0001f6ab Sincronizaci\u00f3n de Blacklist",
                 color=discord.Color.orange(),
                 timestamp=discord.utils.utcnow(),
             )
@@ -997,9 +942,9 @@ def _setup_blacklist_commands(bot: commands.Bot):
                 for uid in sorted(faltan_rol)[:10]:
                     r = db.obtener(uid)
                     nombre = r["nombre_ic"] if r else "?"
-                    lineas_faltan.append(f"• <@{uid}> ({nombre})")
+                    lineas_faltan.append(f"\u2022 <@{uid}> ({nombre})")
                 if len(faltan_rol) > 10:
-                    lineas_faltan.append(f"… y {len(faltan_rol)-10} más")
+                    lineas_faltan.append(f"\u2026 y {len(faltan_rol)-10} m\u00e1s")
                 embed.add_field(
                     name=f"\u26a0\ufe0f En DB sin rol ({len(faltan_rol)})",
                     value="\n".join(lineas_faltan) or "Ninguno",
@@ -1009,9 +954,9 @@ def _setup_blacklist_commands(bot: commands.Bot):
             lineas_sobran = []
             if sobran_rol:
                 for uid in sorted(sobran_rol)[:10]:
-                    lineas_sobran.append(f"• <@{uid}>")
+                    lineas_sobran.append(f"\u2022 <@{uid}>")
                 if len(sobran_rol) > 10:
-                    lineas_sobran.append(f"… y {len(sobran_rol)-10} más")
+                    lineas_sobran.append(f"\u2026 y {len(sobran_rol)-10} m\u00e1s")
                 embed.add_field(
                     name=f"\u26a0\ufe0f Con rol sin DB ({len(sobran_rol)})",
                     value="\n".join(lineas_sobran) or "Ninguno",
@@ -1024,7 +969,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                     try:
                         miembro = guild.get_member(int(uid))
                         if miembro and rol_obj:
-                            await miembro.add_roles(rol_obj, reason="Blacklist-sync: corrección automática")
+                            await miembro.add_roles(rol_obj, reason="Blacklist-sync: correcci\u00f3n autom\u00e1tica")
                             corregidos += 1
                     except Exception as e:
                         logger.warning("Sync: no se pudo asignar rol a %s: %s", uid, e)
@@ -1033,7 +978,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                     try:
                         miembro = guild.get_member(int(uid))
                         if miembro and rol_obj:
-                            await miembro.remove_roles(rol_obj, reason="Blacklist-sync: corrección automática")
+                            await miembro.remove_roles(rol_obj, reason="Blacklist-sync: correcci\u00f3n autom\u00e1tica")
                             corregidos += 1
                     except Exception as e:
                         logger.warning("Sync: no se pudo remover rol a %s: %s", uid, e)
@@ -1052,21 +997,14 @@ def _setup_blacklist_commands(bot: commands.Bot):
             return
 
         await interaction.followup.send(
-            "\u26a0\ufe0f `BLACKLIST_POSTULACIONES_ROLE_ID` no está configurado.", ephemeral=True,
+            "\u26a0\ufe0f `BLACKLIST_POSTULACIONES_ROLE_ID` no est\u00e1 configurado.", ephemeral=True,
         )
 
-
-# ── Evento: detección de tickets ──────────
 
 def _identificar_creador(
     channel: discord.TextChannel,
     bot: commands.Bot,
 ) -> int | None:
-    """
-    Identifica al usuario que abrió el ticket.
-    Prioriza miembros sin roles de staff/bypass para evitar
-    falsos positivos con entrevistadores agregados automáticamente.
-    """
     candidatos: list[discord.Member] = []
     for target, permisos in channel.overwrites.items():
         if not isinstance(target, discord.Member):
@@ -1079,41 +1017,26 @@ def _identificar_creador(
     if not candidatos:
         return None
 
-    # Priorizar el primer candidato que NO sea staff
     for c in candidatos:
         if not _es_staff(c):
             return c.id
 
-    # Si todos son staff (ej: canal de prueba), devolver el primero
     return candidatos[0].id
 
-
-# ── Función centralizada de verificación ──
 
 async def check_ticket_blacklist(
     channel: discord.TextChannel,
     bot: commands.Bot,
     origen: str = "desconocido",
 ) -> bool:
-    """
-    Función centralizada que recibe un canal de ticket, identifica
-    al creador, consulta la blacklist y notifica si corresponde.
-
-    Args:
-        channel: Canal de ticket a verificar.
-        bot:     Instancia del bot.
-        origen:  Identificador textual del caller (logs).
-
-    Returns:
-        True si se notificó al usuario (estaba en blacklist).
-        False en cualquier otro caso (no aplica, ya notificado, error, etc.).
-    """
+    """Funci\u00f3n centralizada que recibe un canal de ticket, identifica
+    al creador, consulta la blacklist y notifica si corresponde."""
     if POSTULACIONES_CATEGORY_ID == 0:
         logger_scanner.debug("[%s] POSTULACIONES_CATEGORY_ID no configurado", origen)
         return False
     if channel.category_id != POSTULACIONES_CATEGORY_ID:
         logger_scanner.debug(
-            "[%s] Canal %s no está en categoría postulaciones (cat=%s)",
+            "[%s] Canal %s no est\u00e1 en categor\u00eda postulaciones (cat=%s)",
             origen, channel.id, channel.category_id,
         )
         return False
@@ -1126,7 +1049,6 @@ async def check_ticket_blacklist(
 
     logger_scanner.info("[%s] Verificando ticket %s", origen, channel.id)
 
-    # ── Identificar creador ─────────────────
     usuario_id = _identificar_creador(channel, bot)
 
     if not usuario_id:
@@ -1140,7 +1062,6 @@ async def check_ticket_blacklist(
         except Exception:
             pass
 
-    # Fallback 3: audit log (cuando Ticket Tool no expone owner ni overwrites)
     if not usuario_id:
         logger_scanner.debug("[%s] Sin creador por historial, consultando audit log", origen)
         try:
@@ -1161,7 +1082,6 @@ async def check_ticket_blacklist(
         logger_scanner.info("[%s] No se pudo identificar creador del ticket %s", origen, channel.id)
         return False
 
-    # ── Resolver Member ─────────────────────
     guild = channel.guild
     miembro = guild.get_member(usuario_id)
     if not miembro:
@@ -1179,18 +1099,16 @@ async def check_ticket_blacklist(
         logger_scanner.warning("[%s] Miembro %s es None tras fetch", origen, usuario_id)
         return False
 
-    # ── Bypass staff ────────────────────────
     if _es_staff(miembro):
         logger_scanner.info("[%s] Usuario %s es staff/bypass, omitiendo", origen, usuario_id)
         log_actions.log_info(
             "\u2139\ufe0f Blacklist: usuario ignorado por bypass",
             f"**Usuario:** {miembro} (`{usuario_id}`)\n"
             f"**Ticket:** {channel.mention}\n"
-            f"**Razón:** Tiene rol de staff/bypass — no se aplicó blacklist.",
+            f"**Raz\u00f3n:** Tiene rol de staff/bypass \u2014 no se aplic\u00f3 blacklist.",
         )
         return False
 
-    # ── Consultar blacklist ─────────────────
     en_blacklist = False
     registro = None
 
@@ -1206,21 +1124,19 @@ async def check_ticket_blacklist(
             rol = guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
             if rol and rol in miembro.roles:
                 en_blacklist = True
-                registro = {"motivo": "PostgreSQL no disponible · bloqueado por rol de respaldo"}
-
+                registro = {"motivo": "PostgreSQL no disponible \u00b7 bloqueado por rol de respaldo"}
     if not en_blacklist and BLACKLIST_ALLOW_ROLE_FALLBACK and BLACKLIST_POSTULACIONES_ROLE_ID:
         rol = guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
         if rol and rol in miembro.roles:
             en_blacklist = True
             if not registro:
-                registro = {"motivo": "Sin motivo registrado (solo rol presente) · posible inconsistencia"}
+                registro = {"motivo": "Sin motivo registrado (solo rol presente) \u00b7 posible inconsistencia"}
 
     logger_scanner.info("[%s] Usuario %s en blacklist: %s", origen, usuario_id, en_blacklist)
 
     if not en_blacklist or not registro:
         return False
 
-    # ── Notificar ────────────────────────────
     _tickets_notificados.add(channel.id)
     _persistir_notificados()
 
@@ -1241,7 +1157,6 @@ async def check_ticket_blacklist(
         f"**Origen:** {origen}",
     )
 
-    # ── Alerta opcional a staff ─────────────
     if BLACKLIST_STAFF_ALERT_CHANNEL_ID:
         alert_channel = guild.get_channel(BLACKLIST_STAFF_ALERT_CHANNEL_ID)
         if alert_channel and isinstance(alert_channel, discord.TextChannel):
@@ -1263,9 +1178,9 @@ async def check_ticket_blacklist(
                 desc_lines.append(f"**Motivo:** {registro['motivo']}")
                 desc_lines.append(f"**Ticket:** {channel.mention} ([Abrir]({link_ticket}))")
                 desc_lines.append("")
-                desc_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+                desc_lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
                 desc_lines.append(
-                    "**⚠ Acción requerida:** revisar y cerrar este ticket "
+                    "**\u26a0 Acci\u00f3n requerida:** revisar y cerrar este ticket "
                     "mediante Ticket Tool."
                 )
 
@@ -1288,7 +1203,6 @@ async def check_ticket_blacklist(
 
 
 async def _on_guild_channel_create(channel: discord.abc.GuildChannel, bot: commands.Bot):
-    """Wrapper para on_guild_channel_create que delega en check_ticket_blacklist."""
     await check_ticket_blacklist(channel, bot, origen="channel_create")
 
 
@@ -1298,18 +1212,13 @@ def _setup_ticket_event(bot: commands.Bot):
     bot.add_listener(wrapper, "on_guild_channel_create")
 
 
-# ── Detección por cambio de categoría ────
-
 async def _on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel, bot: commands.Bot):
-    """Detecta cuando Ticket Tool mueve un canal a la categoría de postulaciones
-    después de crearlo (on_guild_channel_create se dispara antes de que
-    la categoría esté asignada)."""
     if before.category_id == after.category_id:
         return
     if after.category_id != POSTULACIONES_CATEGORY_ID:
         return
     logger_scanner.info(
-        "channel_update: canal %s movido a categoría postulaciones (antes: %s)",
+        "channel_update: canal %s movido a categor\u00eda postulaciones (antes: %s)",
         after.id, before.category_id,
     )
     await check_ticket_blacklist(after, bot, origen="channel_update")
@@ -1321,10 +1230,7 @@ def _setup_ticket_update_event(bot: commands.Bot):
     bot.add_listener(wrapper, "on_guild_channel_update")
 
 
-# ── Fallback: detección por mensaje ──────
-
 def _setup_ticket_fallback(bot: commands.Bot):
-    """Escucha on_message como respaldo adicional. Delega en check_ticket_blacklist."""
     async def wrapper(message: discord.Message):
         if message.author.id == bot.user.id:
             return
@@ -1341,7 +1247,6 @@ def _setup_ticket_fallback(bot: commands.Bot):
 
 
 async def _on_member_join(member: discord.Member, bot: commands.Bot):
-    """Asigna el rol de blacklist automáticamente si el miembro está en la DB."""
     if member.bot:
         return
     if BLACKLIST_POSTULACIONES_ROLE_ID == 0:
@@ -1364,8 +1269,8 @@ async def _on_member_join(member: discord.Member, bot: commands.Bot):
         return
 
     try:
-        await member.add_roles(rol, reason="Blacklist activa en DB · reingreso al servidor")
-        logger.info("Rol de blacklist asignado automáticamente a %s (%s) por reingreso", member, member.id)
+        await member.add_roles(rol, reason="Blacklist activa en DB \u00b7 reingreso al servidor")
+        logger.info("Rol de blacklist asignado autom\u00e1ticamente a %s (%s) por reingreso", member, member.id)
         log_actions.log_info(
             "\U0001f6ab Rol blacklist asignado por reingreso",
             f"**Usuario:** {member.mention} (`{member.id}`)\n"
@@ -1385,14 +1290,7 @@ def _setup_member_join_event(bot: commands.Bot):
     bot.add_listener(wrapper, "on_member_join")
 
 
-# ── Limpieza de notificados antiguos ──────
-
 async def _limpiar_notificados_antiguos(bot: commands.Bot):
-    """
-    Recorre _tickets_notificados y descarta aquellos canales
-    que ya no existen (tickets cerrados/eliminados).
-    Evita que el archivo persistente crezca sin límite.
-    """
     if not _tickets_notificados:
         return
 
@@ -1411,25 +1309,14 @@ async def _limpiar_notificados_antiguos(bot: commands.Bot):
     if ids_a_remover:
         _persistir_notificados()
         logger_scanner.info(
-            "Limpieza de notificados antiguos: %s eliminados (%s → %s)",
+            "Limpieza de notificados antiguos: %s eliminados (%s \u2192 %s)",
             len(ids_a_remover), antes, despues,
         )
 
 
-# ── Escaneo inicial tras reinicio ─────────
-
 async def scan_open_tickets(bot: commands.Bot):
-    """
-    Recorre todos los servidores y canales dentro de la categoría
-    de postulaciones, verificando si el creador de cada ticket
-    abierto está en blacklist.
-
-    Se ejecuta una vez al iniciar el bot para cubrir tickets que
-    quedaron abiertos antes del reinicio.
-    """
     await bot.wait_until_ready()
 
-    # Limpiar notificados de canales que ya no existen
     await _limpiar_notificados_antiguos(bot)
 
     if POSTULACIONES_CATEGORY_ID == 0:
@@ -1444,7 +1331,7 @@ async def scan_open_tickets(bot: commands.Bot):
     for guild in bot.guilds:
         categoria = guild.get_channel(POSTULACIONES_CATEGORY_ID)
         if not categoria:
-            logger_scanner.debug("Categoría %s no encontrada en guild %s", POSTULACIONES_CATEGORY_ID, guild.id)
+            logger_scanner.debug("Categor\u00eda %s no encontrada en guild %s", POSTULACIONES_CATEGORY_ID, guild.id)
             continue
 
         canales = getattr(categoria, "channels", [])
@@ -1467,7 +1354,6 @@ async def scan_open_tickets(bot: commands.Bot):
                     channel.id, guild.id, e,
                 )
 
-        # Pequeña pausa entre servidores para no saturar la API
         if len(bot.guilds) > 1:
             await asyncio.sleep(0.5)
 
@@ -1497,6 +1383,5 @@ async def setup(bot: commands.Bot):
     _setup_ticket_fallback(bot)
     _setup_member_join_event(bot)
     _cargar_notificados()
-    logger.info("Módulo de blacklist de postulaciones cargado")
-    # Escaneo inicial de tickets abiertos (recuperación tras reinicio)
+    logger.info("M\u00f3dulo de blacklist de postulaciones cargado")
     asyncio.create_task(scan_open_tickets(bot))

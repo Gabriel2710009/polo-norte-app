@@ -1,6 +1,6 @@
 import time
-from parser import parse_embed, extract_items
-from items import is_allowed, normalize, ITEM_ALIASES
+from utils.parser import parse_embed, extract_items
+from utils.items import is_allowed, normalize, ITEM_ALIASES
 
 ROLE_ID = "<@&978342236771217480>"
 CHANNEL_ID = "1447055354339786762"

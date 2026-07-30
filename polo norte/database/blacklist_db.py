@@ -228,10 +228,10 @@ def registrar_intento(discord_id: str, ticket_id: str, motivo: str = None):
             (discord_id, ticket_id, motivo),
         )
         conn.commit()
-        logger.info("Intento de postulación registrado: discord_id=%s ticket=%s", discord_id, ticket_id)
+        logger.info("Intento de postulaci\u00f3n registrado: discord_id=%s ticket=%s", discord_id, ticket_id)
     except Exception as e:
         conn.rollback()
-        logger.error("Error registrando intento de postulación: %s", e)
+        logger.error("Error registrando intento de postulaci\u00f3n: %s", e)
     finally:
         cur.close()
         _close_conn(conn)

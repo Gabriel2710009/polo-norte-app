@@ -7,7 +7,7 @@ def extract_items(text: str) -> list[dict]:
     items = []
     for line in text.strip().split("\n"):
         cleaned = _strip_emoji(line)
-        if "item" not in cleaned.lower() and "🔫" not in cleaned and "▪" not in cleaned.lower():
+        if "item" not in cleaned.lower() and "\U0001f52b" not in cleaned and "\u25aa" not in cleaned.lower():
             continue
         m = re.search(r"x(\d+)\s+(.+)", cleaned, re.IGNORECASE)
         if m:
@@ -22,9 +22,9 @@ def parse_embed(text: str) -> dict:
     }
 
     title = text.strip().split("\n")[0].upper() if text.strip() else ""
-    if re.search(r"GUARDAR|GUARDÓ|METIDO|DEPOSITO|DEPÓSITO", title):
+    if re.search(r"GUARDAR|GUARD\u00d3|METIDO|DEPOSITO|DEP\u00d3SITO", title):
         result["action"] = "STASH"
-    elif re.search(r"SACAR|SACÓ|RETIRO", title):
+    elif re.search(r"SACAR|SAC\u00d3|RETIRO", title):
         result["action"] = "RETRIEVE"
 
     for line in text.split("\n"):
@@ -36,7 +36,7 @@ def parse_embed(text: str) -> dict:
         if not m:
             m = re.search(r"Jugador:\s*(.+)", l, re.IGNORECASE)
         if m:
-            result["player"] = m.group(1).strip().lstrip("😊").strip()
+            result["player"] = m.group(1).strip().lstrip("\U0001f60a").strip()
 
         m = re.search(r"\*\*Identificador\*\*:\s*(.+)", l, re.IGNORECASE)
         if not m:
@@ -56,7 +56,7 @@ def parse_embed(text: str) -> dict:
 
         m = re.search(r"\*\*ID\*\*:\s*(.+)", l, re.IGNORECASE)
         if not m:
-            m = re.search(r"(?:🔢)?\s*ID:\s*(.+)", l, re.IGNORECASE)
+            m = re.search(r"(?:\U0001f522)?\s*ID:\s*(.+)", l, re.IGNORECASE)
         if m:
             result["stash_id"] = m.group(1).strip()
 

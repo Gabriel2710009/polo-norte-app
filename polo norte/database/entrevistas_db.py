@@ -1,0 +1,470 @@
+import logging
+import random
+from datetime import datetime, timezone
+from typing import Any
+
+import database
+
+logger = logging.getLogger("EntrevistasDB")
+
+_TABLE_PREGUNTAS = "preguntas_entrevista"
+_TABLE_ENTREVISTAS = "entrevistas"
+_TABLE_INTENTOS = "intentos_entrevista"
+_TABLE_CONFIG = "configuracion_postulacion"
+
+CATEGORIAS_VALIDAS = {"GENERAL", "ARMERIA", "CASOS_PRACTICOS"}
+
+MAX_INTENTOS = 3
+
+
+def _get_conn():
+    return database.get_conn()
+
+
+def _close_conn(conn):
+    database.close_conn(conn)
+
+
+def _row_to_dict(cur) -> dict | None:
+    row = cur.fetchone()
+    if row:
+        cols = [desc[0] for desc in cur.description]
+        return dict(zip(cols, row))
+    return None
+
+
+def _rows_to_list(cur) -> list[dict]:
+    cols = [desc[0] for desc in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def init():
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE_PREGUNTAS} (
+                id SERIAL PRIMARY KEY,
+                pregunta TEXT NOT NULL,
+                categoria TEXT NOT NULL CHECK (categoria IN ('GENERAL', 'ARMERIA', 'CASOS_PRACTICOS')),
+                activo BOOLEAN DEFAULT TRUE,
+                creado_por TEXT NOT NULL,
+                fecha_creacion TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{_TABLE_PREGUNTAS}_categoria
+            ON {_TABLE_PREGUNTAS} (categoria)
+        """)
+        cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{_TABLE_PREGUNTAS}_activo
+            ON {_TABLE_PREGUNTAS} (activo)
+        """)
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE_ENTREVISTAS} (
+                id SERIAL PRIMARY KEY,
+                entrevistado_id TEXT NOT NULL,
+                entrevistador_id TEXT NOT NULL,
+                canal_id TEXT,
+                fecha TIMESTAMPTZ DEFAULT NOW(),
+                resultado TEXT NOT NULL CHECK (resultado IN ('APROBADO', 'NO_APROBADO')),
+                intento INTEGER NOT NULL DEFAULT 1,
+                total_errores INTEGER DEFAULT 0,
+                aprobado_por_entrevista BOOLEAN DEFAULT TRUE,
+                preguntas_used JSONB NOT NULL,
+                respuestas JSONB NOT NULL,
+                motivos JSONB DEFAULT '{{}}'::jsonb
+            )
+        """)
+        cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{_TABLE_ENTREVISTAS}_entrevistado
+            ON {_TABLE_ENTREVISTAS} (entrevistado_id)
+        """)
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE_INTENTOS} (
+                usuario_id TEXT PRIMARY KEY,
+                cantidad_intentos INTEGER DEFAULT 0,
+                ultimo_intento TIMESTAMPTZ
+            )
+        """)
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE_CONFIG} (
+                id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                log_channel_id TEXT DEFAULT '0',
+                postulacion_channel_id TEXT DEFAULT '0',
+                errores_channel_id TEXT DEFAULT '0',
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_by TEXT
+            )
+        """)
+        cur.execute(f"""
+            INSERT INTO {_TABLE_CONFIG} (id) VALUES (1)
+            ON CONFLICT (id) DO NOTHING
+        """)
+
+        conn.commit()
+        logger.info("Tablas de entrevistas listas (PostgreSQL)")
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error creando tablas de entrevistas: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def agregar_pregunta(pregunta: str, categoria: str, creado_por: str) -> int:
+    if categoria not in CATEGORIAS_VALIDAS:
+        raise ValueError(f"Categoria inv\u00e1lida: {categoria}. V\u00e1lidas: {', '.join(sorted(CATEGORIAS_VALIDAS))}")
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"INSERT INTO {_TABLE_PREGUNTAS} (pregunta, categoria, creado_por) VALUES (%s, %s, %s) RETURNING id",
+            (pregunta, categoria, creado_por),
+        )
+        pregunta_id = cur.fetchone()[0]
+        conn.commit()
+        logger.info("Pregunta agregada: id=%s categoria=%s", pregunta_id, categoria)
+        return pregunta_id
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error agregando pregunta: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def editar_pregunta(pregunta_id: int, nueva_pregunta: str) -> bool:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"UPDATE {_TABLE_PREGUNTAS} SET pregunta = %s WHERE id = %s",
+            (nueva_pregunta, pregunta_id),
+        )
+        conn.commit()
+        actualizado = cur.rowcount > 0
+        if actualizado:
+            logger.info("Pregunta editada: id=%s", pregunta_id)
+        else:
+            logger.warning("Pregunta no encontrada para editar: id=%s", pregunta_id)
+        return actualizado
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error editando pregunta %s: %s", pregunta_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def eliminar_pregunta(pregunta_id: int) -> bool:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"DELETE FROM {_TABLE_PREGUNTAS} WHERE id = %s",
+            (pregunta_id,),
+        )
+        conn.commit()
+        eliminado = cur.rowcount > 0
+        if eliminado:
+            logger.info("Pregunta eliminada: id=%s", pregunta_id)
+        else:
+            logger.warning("Pregunta no encontrada para eliminar: id=%s", pregunta_id)
+        return eliminado
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error eliminando pregunta %s: %s", pregunta_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def obtener_pregunta(pregunta_id: int) -> dict | None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT * FROM {_TABLE_PREGUNTAS} WHERE id = %s",
+            (pregunta_id,),
+        )
+        return _row_to_dict(cur)
+    except Exception as e:
+        logger.error("Error obteniendo pregunta id=%s: %s", pregunta_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def listar_preguntas(categoria: str | None = None, solo_activas: bool = True) -> list[dict]:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        condiciones = []
+        params: list[Any] = []
+
+        if categoria:
+            condiciones.append("categoria = %s")
+            params.append(categoria)
+
+        if solo_activas:
+            condiciones.append("activo = TRUE")
+
+        where = ""
+        if condiciones:
+            where = "WHERE " + " AND ".join(condiciones)
+
+        cur.execute(
+            f"SELECT * FROM {_TABLE_PREGUNTAS} {where} ORDER BY id DESC",
+            params,
+        )
+        return _rows_to_list(cur)
+    except Exception as e:
+        logger.error("Error listando preguntas: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def contar_preguntas_por_categoria() -> dict[str, int]:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT categoria, COUNT(*) AS total FROM {_TABLE_PREGUNTAS} "
+            "WHERE activo = TRUE GROUP BY categoria",
+        )
+        resultados = {categoria: 0 for categoria in CATEGORIAS_VALIDAS}
+        for row in cur.fetchall():
+            resultados[row[0]] = row[1]
+        return resultados
+    except Exception as e:
+        logger.error("Error contando preguntas por categoria: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def seleccionar_preguntas_aleatorias(categoria: str, cantidad: int = 5) -> list[dict]:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT id, pregunta, categoria FROM {_TABLE_PREGUNTAS} "
+            "WHERE categoria = %s AND activo = TRUE ORDER BY RANDOM() LIMIT %s",
+            (categoria, cantidad),
+        )
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error("Error seleccionando preguntas aleatorias para %s: %s", categoria, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def guardar_entrevista(
+    entrevistado_id: str,
+    entrevistador_id: str,
+    canal_id: str | None,
+    resultado: str,
+    intento: int,
+    total_errores: int,
+    preguntas_used: list[dict],
+    respuestas: list[str],
+    motivos: dict[int, str] | None = None,
+) -> int:
+    if resultado not in ("APROBADO", "NO_APROBADO"):
+        raise ValueError(f"Resultado inv\u00e1lido: {resultado}")
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"INSERT INTO {_TABLE_ENTREVISTAS} "
+            "(entrevistado_id, entrevistador_id, canal_id, resultado, intento, "
+            "total_errores, aprobado_por_entrevista, preguntas_used, respuestas, motivos) "
+            "VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s::jsonb, %s::jsonb, %s::jsonb) "
+            "RETURNING id",
+            (
+                entrevistado_id,
+                entrevistador_id,
+                canal_id,
+                resultado,
+                intento,
+                total_errores,
+                preguntas_used,
+                respuestas,
+                motivos or {},
+            ),
+        )
+        entrevista_id = cur.fetchone()[0]
+        conn.commit()
+        logger.info(
+            "Entrevista guardada: id=%s user=%s resultado=%s intento=%s",
+            entrevista_id, entrevistado_id, resultado, intento,
+        )
+        return entrevista_id
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error guardando entrevista: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def obtener_entrevistas(usuario_id: str, limite: int = 10) -> list[dict]:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT * FROM {_TABLE_ENTREVISTAS} "
+            "WHERE entrevistado_id = %s ORDER BY fecha DESC LIMIT %s",
+            (usuario_id, limite),
+        )
+        return _rows_to_list(cur)
+    except Exception as e:
+        logger.error("Error obteniendo entrevistas para %s: %s", usuario_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def obtener_intentos(usuario_id: str) -> int:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT cantidad_intentos FROM {_TABLE_INTENTOS} WHERE usuario_id = %s",
+            (usuario_id,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else 0
+    except Exception as e:
+        logger.error("Error obteniendo intentos para %s: %s", usuario_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def incrementar_intento(usuario_id: str) -> int:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"INSERT INTO {_TABLE_INTENTOS} (usuario_id, cantidad_intentos, ultimo_intento) "
+            "VALUES (%s, 1, NOW()) "
+            f"ON CONFLICT (usuario_id) DO UPDATE SET "
+            f"cantidad_intentos = {_TABLE_INTENTOS}.cantidad_intentos + 1, "
+            "ultimo_intento = NOW() "
+            "RETURNING cantidad_intentos",
+            (usuario_id,),
+        )
+        nueva_cantidad = cur.fetchone()[0]
+        conn.commit()
+        logger.info("Intento incrementado: user=%s cantidad=%s", usuario_id, nueva_cantidad)
+        return nueva_cantidad
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error incrementando intento para %s: %s", usuario_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def obtener_ultimo_intento(usuario_id: str) -> datetime | None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT ultimo_intento FROM {_TABLE_INTENTOS} WHERE usuario_id = %s",
+            (usuario_id,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error("Error obteniendo ultimo_intento para %s: %s", usuario_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def restablecer_intentos(usuario_id: str):
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"DELETE FROM {_TABLE_INTENTOS} WHERE usuario_id = %s",
+            (usuario_id,),
+        )
+        conn.commit()
+        logger.info("Intentos restablecidos para usuario: %s", usuario_id)
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error restableciendo intentos para %s: %s", usuario_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def cargar_configuracion() -> dict[str, str]:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT * FROM {_TABLE_CONFIG} WHERE id = 1")
+        row = cur.fetchone()
+        if row:
+            cols = [desc[0] for desc in cur.description]
+            return dict(zip(cols, row))
+        return {"log_channel_id": "0", "postulacion_channel_id": "0", "errores_channel_id": "0"}
+    except Exception as e:
+        logger.error("Error cargando configuraci\u00f3n: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def actualizar_configuracion(clave: str, valor: str, actualizado_por: str):
+    if clave not in ("log_channel_id", "postulacion_channel_id", "errores_channel_id"):
+        raise ValueError(f"Clave de configuraci\u00f3n inv\u00e1lida: {clave}")
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"INSERT INTO {_TABLE_CONFIG} (id, {clave}, updated_by) "
+            "VALUES (1, %s, %s) "
+            f"ON CONFLICT (id) DO UPDATE SET "
+            f"{clave} = EXCLUDED.{clave}, "
+            "updated_at = NOW(), "
+            "updated_by = EXCLUDED.updated_by",
+            (valor, actualizado_por),
+        )
+        conn.commit()
+        logger.info("Configuraci\u00f3n actualizada: %s = %s (por %s)", clave, valor, actualizado_por)
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error actualizando configuraci\u00f3n %s: %s", clave, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
