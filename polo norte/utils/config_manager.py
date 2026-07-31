@@ -33,6 +33,17 @@ def _save_json(filename, data):
         logger.error("Error saving %s: %s", filename, e)
         return False
 
+CONFIG_FILE = "config.json"
+DEFAULT_CONFIG = {
+    "owner_id": None,
+}
+
+def load_config():
+    return _load_json(CONFIG_FILE, DEFAULT_CONFIG)
+
+def save_config(config):
+    return _save_json(CONFIG_FILE, config)
+
 DEFAULT_APROBAR_CONFIG = {
     "roles_asignar": [
         1306126579482628106,

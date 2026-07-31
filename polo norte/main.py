@@ -17,6 +17,7 @@ from cogs import bienvenida_cog
 from cogs import blacklist_cog
 from cogs import help_cog
 from cogs import entrevistas_cog
+from utils import error_handler
 
 load_dotenv()
 
@@ -64,6 +65,7 @@ async def on_ready():
         logger.error("Faltan variables de entorno.")
         return
 
+    await error_handler.setup(bot)
     log_actions.setup(bot, LOG_CHANNEL_ID)
     await aprobar.setup(bot)
 
