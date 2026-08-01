@@ -383,7 +383,7 @@ def _marcar_interfaz_expirada(session: InterviewSession, motivo: str):
     active_interviews.pop(session.user_id, None)
     _persistir_sesion(session)
     logger.warning(
-        "[ENTREVISTA] Interfaz expirada, sesi\u00f3n recuperable (%s): "
+        "[ENTREVISTA] Sesi\u00f3n expirada, recuperaci\u00f3n disponible v\u00eda comando (%s): "
         "user=%s staff=%s session=%s",
         motivo, session.user_id, session.staff_id, session.session_id,
     )
@@ -784,7 +784,7 @@ class QuestionView(View):
         active_interviews.pop(self.session.user_id, None)
         _persistir_sesion(self.session)
         logger.info(
-            "[ENTREVISTA] Interfaz expirada por timeout, sesi\u00f3n recuperable: "
+            "[ENTREVISTA] Sesi\u00f3n expirada, recuperaci\u00f3n disponible v\u00eda comando (timeout): "
             "user=%s staff=%s session=%s",
             self.session.user_id, self.session.staff_id, self.session.session_id,
         )
@@ -924,6 +924,11 @@ async def _recuperar_sesion(
     session: InterviewSession,
 ) -> bool:
     async with _get_recovery_lock(session.user_id):
+        logger.info(
+            "[ENTREVISTA] Recuperaci\u00f3n solicitada: "
+            "user=%s autor=%s session=%s",
+            session.user_id, interaction.user.id, session.session_id,
+        )
         if interaction.user.id != session.staff_id:
             await interaction.response.send_message(
                 "No ten\u00e9s permisos para controlar esta entrevista.",
@@ -1428,6 +1433,11 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
                 )
                 return
             sesion_recuperable = _datos_a_session(sesion_persistida, interaction.client)
+            logger.info(
+                "[ENTREVISTA] Mostrando opciones de recuperaci\u00f3n: "
+                "user=%s staff=%s estado=%s session=%s",
+                usuario.id, interaction.user.id, estado_db, sesion_recuperable.session_id,
+            )
             await interaction.response.send_message(
                 content=(
                     f"\u26a0\ufe0f Se encontr\u00f3 una entrevista en curso para {usuario.mention}.\n"

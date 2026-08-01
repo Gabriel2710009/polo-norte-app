@@ -219,7 +219,7 @@ class TestLoopPeriodico(unittest.TestCase):
                 loop.run_until_complete(asyncio.sleep(0))
                 loop.close()
             mock_loop.assert_called_once()
-            self.assertEqual(status_reporter._report_interval, 30 * 60)
+            self.assertEqual(status_reporter._report_interval, 24 * 60 * 60)
             self.assertEqual(status_reporter._admin_user_id, status_reporter.ADMIN_USER_ID)
             self.assertTrue(mock_task.called)
 

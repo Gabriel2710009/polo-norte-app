@@ -9,7 +9,7 @@ from services import log_actions
 logger = logging.getLogger("StatusReporter")
 
 ADMIN_USER_ID = 691475896019714139
-REPORT_INTERVAL_MINUTES = 30
+REPORT_INTERVAL_MINUTES = 24 * 60
 
 _bot = None
 _admin_user_id = ADMIN_USER_ID
