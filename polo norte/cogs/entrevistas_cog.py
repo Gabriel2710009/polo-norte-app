@@ -32,11 +32,15 @@ class InterviewSession:
     current_index: int = 0
     answers: list[str] = field(default_factory=list)
     motives: dict[int, str] = field(default_factory=dict)
-    original_interaction: discord.Interaction | None = None
     intento: int = 1
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     processing: bool = False
     answered_current: bool = False
+    message: discord.Message | None = None
+    message_id: int | None = None
+    client: discord.Client | None = None
+    finished: bool = False
+    expired: bool = False
 
 
 active_interviews: dict[int, InterviewSession] = {}
@@ -228,8 +232,105 @@ def _plantilla_errores(session, resultado):
     return "\n".join(lineas)
 
 
+async def _obtener_mensaje_entrevista(
+    session: InterviewSession,
+    interaction: discord.Interaction | None = None,
+) -> discord.Message | None:
+    if interaction is not None:
+        try:
+            message = await interaction.original_response()
+        except Exception:
+            logger.exception(
+                "No se pudo vincular el mensaje a la interacci\u00f3n actual: user=%s",
+                session.user_id,
+            )
+        else:
+            session.message = message
+            session.message_id = message.id
+            if message.channel is not None:
+                session.channel_id = message.channel.id
+            return message
+
+    if session.message is not None:
+        return session.message
+
+    if session.message_id is None or session.client is None:
+        return None
+
+    channel = session.client.get_channel(session.channel_id)
+    if channel is None:
+        logger.warning(
+            "No se pudo resolver el canal %s para reconstruir la entrevista: user=%s",
+            session.channel_id, session.user_id,
+        )
+        return None
+
+    try:
+        message = await channel.fetch_message(session.message_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        logger.exception(
+            "No se pudo reconstruir el mensaje de la entrevista: user=%s",
+            session.user_id,
+        )
+        return None
+
+    session.message = message
+    return message
+
+
+async def _editar_mensaje_entrevista(
+    session: InterviewSession,
+    interaction: discord.Interaction | None = None,
+    *,
+    embed: discord.Embed | None = None,
+    view: discord.ui.View | None = None,
+):
+    if interaction is not None and not interaction.response.is_done():
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            logger.warning(
+                "No se pudo diferir la interacci\u00f3n antes de editar la entrevista: user=%s",
+                session.user_id,
+            )
+
+    message = await _obtener_mensaje_entrevista(session, interaction)
+    if message is None:
+        logger.error(
+            "No se pudo obtener el mensaje de la entrevista para editarlo: user=%s",
+            session.user_id,
+        )
+        return
+
+    try:
+        await message.edit(embed=embed, view=view)
+    except discord.NotFound:
+        logger.error(
+            "Mensaje de entrevista no encontrado al editar: user=%s",
+            session.user_id,
+        )
+    except discord.Forbidden:
+        logger.error(
+            "Sin permisos para editar el mensaje de entrevista: user=%s",
+            session.user_id,
+        )
+    except discord.HTTPException:
+        logger.exception(
+            "Error HTTP editando mensaje de entrevista: user=%s",
+            session.user_id,
+        )
+
+
 async def finalizar_entrevista(session: InterviewSession):
-    bot = session.original_interaction.client
+    session.finished = True
+    bot = session.client
+    if bot is None:
+        logger.error(
+            "No hay cliente disponible para finalizar la entrevista: user=%s",
+            session.user_id,
+        )
+        active_interviews.pop(session.user_id, None)
+        return
     guild = bot.get_guild(session.guild_id)
     if not guild:
         logger.error("Guild %s no encontrada para finalizar entrevista", session.guild_id)
@@ -509,6 +610,12 @@ class ReasonModal(Modal, title="Motivo de la respuesta"):
         self.add_item(self.motivo_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.session.finished or self.session.expired:
+            await interaction.response.send_message(
+                "La entrevista ya termin\u00f3.",
+                ephemeral=True,
+            )
+            return
         if self.session.answered_current:
             await interaction.response.send_message(
                 "Esta pregunta ya fue procesada.",
@@ -531,19 +638,14 @@ class ReasonModal(Modal, title="Motivo de la respuesta"):
                     description="Procesando resultado...",
                     color=discord.Color.green(),
                 )
-                try:
-                    await self.session.original_interaction.edit_original_response(embed=embed, view=None)
-                except Exception:
-                    logger.exception("Error editando mensaje al finalizar entrevista")
+                self.session.finished = True
+                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
                 await finalizar_entrevista(self.session)
             else:
                 embed = mostrar_pregunta_actual(self.session)
                 view = QuestionView(self.session)
-                try:
-                    await self.session.original_interaction.edit_original_response(embed=embed, view=view)
-                    self.session.answered_current = False
-                except Exception:
-                    logger.exception("Error editando mensaje para siguiente pregunta")
+                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=view)
+                self.session.answered_current = False
         finally:
             self.session.processing = False
 
@@ -560,6 +662,7 @@ class QuestionView(View):
     async def on_timeout(self):
         if active_interviews.get(self.session.user_id) is not self.session:
             return
+        self.session.expired = True
         active_interviews.pop(self.session.user_id, None)
         logger.info(
             "Entrevista expirada por timeout: user=%s staff=%s",
@@ -567,6 +670,13 @@ class QuestionView(View):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.session.finished or self.session.expired:
+            await interaction.response.send_message(
+                "La entrevista ya termin\u00f3.",
+                ephemeral=True,
+            )
+            return False
+
         if interaction.user.id != self.session.staff_id:
             await interaction.response.send_message(
                 "No tienes permiso para controlar esta entrevista.",
@@ -591,6 +701,12 @@ class QuestionView(View):
         return True
 
     async def _avanzar(self, interaction: discord.Interaction, respuesta: str):
+        if self.session.finished or self.session.expired:
+            await interaction.response.send_message(
+                "La entrevista ya termin\u00f3.",
+                ephemeral=True,
+            )
+            return
         if self.session.answered_current:
             await interaction.response.send_message(
                 "Esta pregunta ya fue procesada.",
@@ -609,18 +725,13 @@ class QuestionView(View):
                     description="Procesando resultado...",
                     color=discord.Color.green(),
                 )
-                try:
-                    await interaction.response.edit_message(embed=embed, view=None)
-                except Exception:
-                    logger.exception("Error editando mensaje al finalizar entrevista (BIEN)")
+                self.session.finished = True
+                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
                 await finalizar_entrevista(self.session)
             else:
                 embed = mostrar_pregunta_actual(self.session)
-                try:
-                    await interaction.response.edit_message(embed=embed, view=self)
-                    self.session.answered_current = False
-                except Exception:
-                    logger.exception("Error editando mensaje para siguiente pregunta (BIEN)")
+                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=self)
+                self.session.answered_current = False
         finally:
             self.session.processing = False
 
@@ -638,6 +749,12 @@ class QuestionView(View):
         label="Regular",
     )
     async def regular(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.session.finished or self.session.expired:
+            await interaction.response.send_message(
+                "La entrevista ya termin\u00f3.",
+                ephemeral=True,
+            )
+            return
         if self.session.processing:
             await interaction.response.send_message(
                 "Esta pregunta ya est\u00e1 siendo procesada.",
@@ -653,6 +770,12 @@ class QuestionView(View):
         label="Mal",
     )
     async def mal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.session.finished or self.session.expired:
+            await interaction.response.send_message(
+                "La entrevista ya termin\u00f3.",
+                ephemeral=True,
+            )
+            return
         if self.session.processing:
             await interaction.response.send_message(
                 "Esta pregunta ya est\u00e1 siendo procesada.",
@@ -1070,8 +1193,8 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         guild_id=interaction.guild_id,
         questions=preguntas_totales,
         intento=intentos + 1,
+        client=interaction.client,
     )
-    sesion.original_interaction = interaction
     active_interviews[usuario.id] = sesion
 
     embed = mostrar_pregunta_actual(sesion)
@@ -1083,6 +1206,15 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         view=view,
         ephemeral=True,
     )
+    try:
+        message = await interaction.original_response()
+    except Exception:
+        logger.exception("No se pudo obtener el mensaje de la entrevista al iniciarla")
+    else:
+        sesion.message = message
+        sesion.message_id = message.id
+        if message.channel is not None:
+            sesion.channel_id = message.channel.id
     logger.info(
         "Entrevista iniciada: user=%s staff=%s intento=%s",
         usuario.id, interaction.user.id, intentos + 1,

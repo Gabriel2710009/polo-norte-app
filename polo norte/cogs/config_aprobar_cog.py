@@ -26,7 +26,16 @@ class RoleSelectView(discord.ui.View):
         role_ids = [role.id for role in self.role_select.values]
         self.parent.config[self.config_key] = role_ids
         embed = self.parent.build_embed()
-        await self.parent.original_interaction.edit_original_response(embed=embed, view=self.parent)
+        try:
+            panel = await interaction.original_response()
+        except Exception:
+            logger.exception("No se pudo obtener el mensaje del panel de aprobaci\u00f3n")
+        else:
+            self.parent.message = panel
+            try:
+                await self.parent.message.edit(embed=embed, view=self.parent)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.exception("Error editando mensaje del panel de aprobaci\u00f3n")
         await interaction.response.edit_message(
             content="\u2705 Roles actualizados.",
             embed=None,
@@ -40,10 +49,10 @@ class RoleSelectView(discord.ui.View):
 
 
 class AprobarConfigView(discord.ui.View):
-    def __init__(self, config, original_interaction):
+    def __init__(self, config):
         super().__init__(timeout=300)
         self.config = config
-        self.original_interaction = original_interaction
+        self.message: discord.Message | None = None
 
     def build_embed(self):
         assign_roles = "\n".join(f"<@&{rid}>" for rid in self.config.get("roles_asignar", [])) or "Ninguno"
@@ -116,9 +125,13 @@ async def config_aprobar(interaction: discord.Interaction):
         return
 
     config = config_manager.load_aprobar_config()
-    view = AprobarConfigView(config, interaction)
+    view = AprobarConfigView(config)
     embed = view.build_embed()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    try:
+        view.message = await interaction.original_response()
+    except Exception:
+        logger.exception("No se pudo obtener el mensaje del panel de aprobaci\u00f3n")
 
 
 async def setup(bot):
