@@ -156,7 +156,7 @@ def agregar_pregunta(pregunta: str, categoria: str, creado_por: str, respuesta_e
         return pregunta_id
     except Exception as e:
         conn.rollback()
-        logger.error("Error agregando pregunta: %s", e)
+        logger.warning("Error agregando pregunta: %s", e)
         raise
     finally:
         cur.close()
@@ -190,7 +190,7 @@ def editar_pregunta(pregunta_id: int, nueva_pregunta: str, nueva_categoria: str 
         return actualizado
     except Exception as e:
         conn.rollback()
-        logger.error("Error editando pregunta %s: %s", pregunta_id, e)
+        logger.warning("Error editando pregunta %s: %s", pregunta_id, e)
         raise
     finally:
         cur.close()
@@ -214,7 +214,7 @@ def eliminar_pregunta(pregunta_id: int) -> bool:
         return eliminado
     except Exception as e:
         conn.rollback()
-        logger.error("Error eliminando pregunta %s: %s", pregunta_id, e)
+        logger.warning("Error eliminando pregunta %s: %s", pregunta_id, e)
         raise
     finally:
         cur.close()
@@ -231,7 +231,7 @@ def obtener_pregunta(pregunta_id: int) -> dict | None:
         )
         return _row_to_dict(cur)
     except Exception as e:
-        logger.error("Error obteniendo pregunta id=%s: %s", pregunta_id, e)
+        logger.warning("Error obteniendo pregunta id=%s: %s", pregunta_id, e)
         raise
     finally:
         cur.close()
@@ -262,7 +262,7 @@ def listar_preguntas(categoria: str | None = None, solo_activas: bool = True) ->
         )
         return _rows_to_list(cur)
     except Exception as e:
-        logger.error("Error listando preguntas: %s", e)
+        logger.warning("Error listando preguntas: %s", e)
         raise
     finally:
         cur.close()
@@ -282,7 +282,7 @@ def contar_preguntas_por_categoria() -> dict[str, int]:
             resultados[row[0]] = row[1]
         return resultados
     except Exception as e:
-        logger.error("Error contando preguntas por categoria: %s", e)
+        logger.warning("Error contando preguntas por categoria: %s", e)
         raise
     finally:
         cur.close()
@@ -301,7 +301,7 @@ def seleccionar_preguntas_aleatorias(categoria: str, cantidad: int = 5) -> list[
         cols = [desc[0] for desc in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
     except Exception as e:
-        logger.error("Error seleccionando preguntas aleatorias para %s: %s", categoria, e)
+        logger.warning("Error seleccionando preguntas aleatorias para %s: %s", categoria, e)
         raise
     finally:
         cur.close()
@@ -352,7 +352,7 @@ def guardar_entrevista(
         return entrevista_id
     except Exception as e:
         conn.rollback()
-        logger.error("Error guardando entrevista: %s", e)
+        logger.warning("Error guardando entrevista: %s", e)
         raise
     finally:
         cur.close()
@@ -370,7 +370,7 @@ def obtener_entrevistas(usuario_id: str, limite: int = 10) -> list[dict]:
         )
         return _rows_to_list(cur)
     except Exception as e:
-        logger.error("Error obteniendo entrevistas para %s: %s", usuario_id, e)
+        logger.warning("Error obteniendo entrevistas para %s: %s", usuario_id, e)
         raise
     finally:
         cur.close()
@@ -388,7 +388,7 @@ def obtener_intentos(usuario_id: str) -> int:
         row = cur.fetchone()
         return row[0] if row else 0
     except Exception as e:
-        logger.error("Error obteniendo intentos para %s: %s", usuario_id, e)
+        logger.warning("Error obteniendo intentos para %s: %s", usuario_id, e)
         raise
     finally:
         cur.close()
@@ -414,7 +414,7 @@ def incrementar_intento(usuario_id: str) -> int:
         return nueva_cantidad
     except Exception as e:
         conn.rollback()
-        logger.error("Error incrementando intento para %s: %s", usuario_id, e)
+        logger.warning("Error incrementando intento para %s: %s", usuario_id, e)
         raise
     finally:
         cur.close()
@@ -432,7 +432,7 @@ def obtener_ultimo_intento(usuario_id: str) -> datetime | None:
         row = cur.fetchone()
         return row[0] if row else None
     except Exception as e:
-        logger.error("Error obteniendo ultimo_intento para %s: %s", usuario_id, e)
+        logger.warning("Error obteniendo ultimo_intento para %s: %s", usuario_id, e)
         raise
     finally:
         cur.close()
@@ -451,7 +451,7 @@ def restablecer_intentos(usuario_id: str):
         logger.info("Intentos restablecidos para usuario: %s", usuario_id)
     except Exception as e:
         conn.rollback()
-        logger.error("Error restableciendo intentos para %s: %s", usuario_id, e)
+        logger.warning("Error restableciendo intentos para %s: %s", usuario_id, e)
         raise
     finally:
         cur.close()
@@ -469,7 +469,7 @@ def cargar_configuracion() -> dict[str, str]:
             return dict(zip(cols, row))
         return {"log_channel_id": "0", "errores_channel_id": "0"}
     except Exception as e:
-        logger.error("Error cargando configuraci\u00f3n: %s", e)
+        logger.warning("Error cargando configuraci\u00f3n: %s", e)
         raise
     finally:
         cur.close()
@@ -496,7 +496,7 @@ def actualizar_configuracion(clave: str, valor: str, actualizado_por: str):
         logger.info("Configuraci\u00f3n actualizada: %s = %s (por %s)", clave, valor, actualizado_por)
     except Exception as e:
         conn.rollback()
-        logger.error("Error actualizando configuraci\u00f3n %s: %s", clave, e)
+        logger.warning("Error actualizando configuraci\u00f3n %s: %s", clave, e)
         raise
     finally:
         cur.close()
@@ -542,7 +542,7 @@ def guardar_sesion_entrevista(datos: dict):
         )
     except Exception as e:
         conn.rollback()
-        logger.error("Error guardando sesi\u00f3n de entrevista: %s", e)
+        logger.warning("Error guardando sesi\u00f3n de entrevista: %s", e)
         raise
     finally:
         cur.close()
@@ -559,7 +559,7 @@ def recuperar_sesion_entrevista(user_id: str) -> dict | None:
         )
         return _row_to_dict(cur)
     except Exception as e:
-        logger.error("Error recuperando sesi\u00f3n de entrevista para %s: %s", user_id, e)
+        logger.warning("Error recuperando sesi\u00f3n de entrevista para %s: %s", user_id, e)
         raise
     finally:
         cur.close()
@@ -581,7 +581,7 @@ def eliminar_sesion_entrevista(user_id: str) -> bool:
         return eliminado
     except Exception as e:
         conn.rollback()
-        logger.error("Error eliminando sesi\u00f3n de entrevista para %s: %s", user_id, e)
+        logger.warning("Error eliminando sesi\u00f3n de entrevista para %s: %s", user_id, e)
         raise
     finally:
         cur.close()
@@ -607,7 +607,7 @@ def limpiar_sesiones_antiguas(dias: int = 7) -> int:
         return eliminadas
     except Exception as e:
         conn.rollback()
-        logger.error("Error limpiando sesiones de entrevista antiguas: %s", e)
+        logger.warning("Error limpiando sesiones de entrevista antiguas: %s", e)
         raise
     finally:
         cur.close()
@@ -625,7 +625,7 @@ def contar_sesiones_recuperables() -> int:
         row = cur.fetchone()
         return row[0] if row else 0
     except Exception as e:
-        logger.error("Error contando sesiones de entrevista recuperables: %s", e)
+        logger.warning("Error contando sesiones de entrevista recuperables: %s", e)
         raise
     finally:
         cur.close()
@@ -644,7 +644,7 @@ def listar_sesiones_por_canal(canal_id: str) -> list[dict]:
         )
         return _rows_to_list(cur)
     except Exception as e:
-        logger.error("Error listando sesiones por canal %s: %s", canal_id, e)
+        logger.warning("Error listando sesiones por canal %s: %s", canal_id, e)
         raise
     finally:
         cur.close()

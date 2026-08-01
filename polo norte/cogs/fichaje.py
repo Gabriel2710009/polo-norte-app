@@ -79,7 +79,7 @@ async def check_taser_retirado_al_inicio(bot, user_id: str, logs_channel_id: int
                         logger.info("Taser retirado encontrado en historial para %s", user_id)
                         return True
     except Exception as exc:
-        logger.error("Error revisando stash history para %s: %s", user_id, exc)
+        logger.warning("Error revisando stash history para %s: %s", user_id, exc)
         await log_actions.log_error("\u274c Error historial stash", f"Usuario <@{user_id}>\n`{exc}`")
     return False
 
@@ -107,7 +107,7 @@ async def handle_clock_in(bot, embed, logs_channel_id: int):
                 f"{nombre} (<@{data['user_id']}>) retir\u00f3 un t\u00e1ser antes de su turno. Se controlar\u00e1 su devoluci\u00f3n al cierre."
             )
     except Exception as e:
-        logger.error("Error en handle_clock_in: %s", e)
+        logger.warning("Error en handle_clock_in: %s", e)
         await log_actions.log_error("\u274c Error clock-in", f"`{e}`")
 
 
@@ -133,7 +133,7 @@ async def handle_clock_out(bot, embed, logs_channel_id: int, alert_channel_id: i
             _esperar_y_verificar(bot, data["user_id"], record_id, alert_channel_id, taser_dm_activo, evt)
         )
     except Exception as e:
-        logger.error("Error en handle_clock_out: %s", e)
+        logger.warning("Error en handle_clock_out: %s", e)
         await log_actions.log_error("\u274c Error clock-out", f"`{e}`")
 
 
@@ -217,7 +217,7 @@ async def _esperar_y_verificar(bot, user_id, record_id, alert_channel_id, taser_
                 log_actions.log_warning("\u26a0\ufe0f DM fallido", f"No se pudo enviar DM a <@{user_id}>:\n`{exc}`")
 
     except Exception as e:
-        logger.error("Error en verificaci\u00f3n de t\u00e1ser para %s: %s", user_id, e)
+        logger.warning("Error en verificaci\u00f3n de t\u00e1ser para %s: %s", user_id, e)
         await log_actions.log_error("\u274c Error verificaci\u00f3n t\u00e1ser", f"Usuario <@{user_id}>\n`{e}`")
 
 
@@ -251,7 +251,7 @@ def procesar_stash_para_taser(embed_data: dict) -> dict | None:
                             "tuvo_alerta": result["tuvo_alerta"],
                         }
     except Exception as e:
-        logger.error("Error en procesar_stash_para_taser: %s", e)
+        logger.warning("Error en procesar_stash_para_taser: %s", e)
     return None
 
 
@@ -301,7 +301,7 @@ async def _esperar_fichaje_para_taser(bot, user_id, item_name, alert_channel_id)
                 f"{nombre} (<@{user_id}>) retir\u00f3 `{item_name}` y no inici\u00f3 fichaje en {RETIRO_SIN_FICHAJE_WAIT_MINUTES} min."
             )
     except Exception as e:
-        logger.error("Error en _esperar_fichaje_para_taser: %s", e)
+        logger.warning("Error en _esperar_fichaje_para_taser: %s", e)
         await log_actions.log_error("\u274c Error espera fichaje", f"Usuario <@{user_id}>\n`{e}`")
 
 
@@ -328,7 +328,7 @@ async def verificar_pendientes_al_inicio(bot, alert_channel_id: int):
                 db.mark_alerta_enviada(record_id)
                 log_actions.log_warning("\u23f3 Alerta pendiente reenviada", f"{nombre} (<@{user_id}>) - t\u00e1ser no devuelto de turno anterior.")
     except Exception as e:
-        logger.error("Error en verificar_pendientes_al_inicio: %s", e)
+        logger.warning("Error en verificar_pendientes_al_inicio: %s", e)
         await log_actions.log_error("\u274c Error pendientes inicio", f"`{e}`")
 
 
@@ -376,7 +376,7 @@ async def recordatorio_loop(bot, alert_channel_id):
 
             db.set_ultimo_dm(record_id)
     except Exception as e:
-        logger.error("Error en recordatorio_loop: %s", e)
+        logger.warning("Error en recordatorio_loop: %s", e)
         await log_actions.log_error("\u274c Error recordatorio loop", f"`{e}`")
 
 

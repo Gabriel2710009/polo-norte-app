@@ -74,10 +74,10 @@ async def _asignar_roles(member: discord.Member, roles: list[discord.Role]) -> t
             await member.add_roles(role, reason="Aprobaci\u00f3n de postulaci\u00f3n")
             asignados.append(role)
         except discord.Forbidden:
-            logger.error("Permisos insuficientes para asignar %s a %s", role.id, member.id)
+            logger.warning("Permisos insuficientes para asignar %s a %s", role.id, member.id)
             errores.append(role)
         except Exception as e:
-            logger.error("Error asignando rol %s a %s: %s", role.id, member.id, e)
+            logger.warning("Error asignando rol %s a %s: %s", role.id, member.id, e)
             errores.append(role)
     return asignados, errores
 
@@ -90,10 +90,10 @@ async def _eliminar_roles(member: discord.Member, roles: list[discord.Role]) -> 
             await member.remove_roles(role, reason="Aprobaci\u00f3n de postulaci\u00f3n - limpieza")
             eliminados.append(role)
         except discord.Forbidden:
-            logger.error("Permisos insuficientes para eliminar %s a %s", role.id, member.id)
+            logger.warning("Permisos insuficientes para eliminar %s a %s", role.id, member.id)
             errores.append(role)
         except Exception as e:
-            logger.error("Error eliminando rol %s a %s: %s", role.id, member.id, e)
+            logger.warning("Error eliminando rol %s a %s: %s", role.id, member.id, e)
             errores.append(role)
     return eliminados, errores
 
@@ -188,7 +188,7 @@ async def ejecutar_aprobacion(
     guild = channel.guild
 
     if not guild.me.guild_permissions.manage_roles:
-        logger.error("El bot no tiene permisos de gestionar roles en el servidor %s", guild.id)
+        logger.warning("El bot no tiene permisos de gestionar roles en el servidor %s", guild.id)
         return {
             "exito": False, "asignados": 0, "eliminados": 0,
             "errores_asignar": [], "errores_eliminar": [], "bloqueados": [],
@@ -212,7 +212,7 @@ async def ejecutar_aprobacion(
     try:
         await _enviar_felicitaciones(channel, member)
     except Exception as e:
-        logger.error("Error enviando felicitaciones: %s", e)
+        logger.warning("Error enviando felicitaciones: %s", e)
 
     tipo_acceso = _obtener_tipo_acceso(admin)
 
@@ -224,7 +224,7 @@ async def ejecutar_aprobacion(
             roles_bloqueados, channel,
         )
     except Exception as e:
-        logger.error("Error enviando auditor\u00eda: %s", e)
+        logger.warning("Error enviando auditoria: %s", e)
 
     errores_reales_asignar = [r for r in errores_asignar if r is not None]
     errores_reales_eliminar = [r for r in errores_eliminar if r is not None]

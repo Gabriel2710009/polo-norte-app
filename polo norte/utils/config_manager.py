@@ -1,48 +1,30 @@
-import json
-import os
+"""Gestor de configuraciones globales del bot.
+
+Migrado de JSON a PostgreSQL. Conserva los valores por defecto (fallback)
+para mantener compatibilidad durante la migración.
+"""
+
 import logging
+from database import config_db
 
 logger = logging.getLogger("ConfigManager")
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-
-def _ensure_data_dir():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-def _load_json(filename, default):
-    _ensure_data_dir()
-    path = os.path.join(DATA_DIR, filename)
-    if not os.path.exists(path):
-        _save_json(filename, default)
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Error loading %s: %s", filename, e)
-        return default
-
-def _save_json(filename, data):
-    _ensure_data_dir()
-    path = os.path.join(DATA_DIR, filename)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        return True
-    except Exception as e:
-        logger.error("Error saving %s: %s", filename, e)
-        return False
-
-CONFIG_FILE = "config.json"
-DEFAULT_CONFIG = {
-    "owner_id": None,
-}
 
 def load_config():
-    return _load_json(CONFIG_FILE, DEFAULT_CONFIG)
+    """Carga la config global (owner_id)."""
+    valor = config_db.cargar_global_clave("owner_id")
+    if valor:
+        return {"owner_id": valor}
+    return {"owner_id": None}
 
-def save_config(config):
-    return _save_json(CONFIG_FILE, config)
+
+def save_config(config: dict):
+    """Guarda la config global."""
+    if "owner_id" in config and config["owner_id"] is not None:
+        config_db.guardar_global_clave("owner_id", str(config["owner_id"]))
+
+
+# ── Configuración de aprobación ──────────────────────────────────────────
 
 DEFAULT_APROBAR_CONFIG = {
     "roles_asignar": [
@@ -61,52 +43,59 @@ DEFAULT_APROBAR_CONFIG = {
     ],
 }
 
-APROBAR_CONFIG_FILE = "config_aprobar.json"
 
-def load_aprobar_config():
-    return _load_json(APROBAR_CONFIG_FILE, DEFAULT_APROBAR_CONFIG)
+def load_aprobar_config() -> dict:
+    """Carga desde DB. Si está vacía, migra el default JSON y lo persiste."""
+    return config_db.cargar_aprobar(datos=DEFAULT_APROBAR_CONFIG)
 
-def save_aprobar_config(config):
-    return _save_json(APROBAR_CONFIG_FILE, config)
+
+def save_aprobar_config(config: dict):
+    """Guarda a DB."""
+    return config_db.guardar_aprobar(config)
+
+
+# ── Configuración de bienvenida ──────────────────────────────────────────
 
 DEFAULT_BIENVENIDA_MENSAJE = (
     "Nombre IC:\n"
     "Numero IC:\n"
-    "IBAN IC: (n\u00famero de cuenta de banco)\n"
+    "IBAN IC: (número de cuenta de banco)\n"
     "Steam URL/Nombre:\n"
-    "\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\n"
+    "————————————————————————————\n"
     "\n"
     "* Iniciar/salir de servicio.\n"
-    "  https://discord.com/channels/1305788361679573022/1307624091267629147\n"
+    "  https://discord.com/channels/1305788361679573022/130612761267629147\n"
     "\n"
     "* Apuntar apertura.\n"
-    "  https://discord.com/channels/1305788361679573022/1507840034219233472\n"
+    "  https://discord.com/channels/1305788361679573022/130784003419233472\n"
     "\n"
     "* Copiar \"trabajaste un total de ...\" y pegar en aviso de horas.\n"
-    "  https://discord.com/channels/1305788361679573022/1307624129335398409\n"
+    "  https://discord.com/channels/1305788361679573022/130762400329598409\n"
     "\n"
-    "* Restar/sumar horas (tambi\u00e9n lo tienes que sumar/restar en el mensaje de aviso de horas).\n"
+    "* Restarle sumar horas (también sumar/restar en mensaje de aviso de horas).\n"
     "  https://discord.com/channels/1305788361679573022/1307624192631377970\n"
     "\n"
-    "* Si no puedes realizar las horas pedir inactividad con antelaci\u00f3n.\n"
-    "  https://discord.com/channels/1305788361679573022/1307627066576867328\n"
+    "* Si no puedes horizontes pedir inactividad con antelación.\n"
+    "  https://discord.com/channels/1305788361679573022/1307627063886867328\n"
     "\n"
-    "* Apuntar ventas despu\u00e9s de vender.\n"
-    "  https://discord.com/channels/1305788361679573022/1305968451235614720\n"
+    "* Apuntar ventas después de vender.\n"
+    "  https://discord.com/channels/1305788361679573022/1305968451233614720\n"
     "\n"
     "* Restar ventas.\n"
-    "  https://discord.com/channels/1305788361679573022/1305968486404853780\n"
+    "  https://discord.com/channels/1305788361679573022/1305968483804853780\n"
     "\n"
     "* Leer un poco el canal de anuncios antes de trabajar.\n"
     "  https://discord.com/channels/1305788361679573022/1307626015320838204\n"
     "\n"
-    "Cualquier duda pod\u00e9is contactar con los <@&1306124327896481804> y con los <@&1306129434172198932> por vuestro canal privado pod\u00e9is preguntar e informar lo que sea necesario."
+    "Cualquier duda podéis contactar con los <@&1306134227896481804> y con "
+    "los <@&1306139424172198932> por vuestro canal privado podéis preguntar "
+    "e informar lo que sea necesario."
 )
 
-BIENVENIDA_CONFIG_FILE = "config_bienvenida.json"
 
-def load_bienvenida_config():
-    return _load_json(BIENVENIDA_CONFIG_FILE, {"mensaje": DEFAULT_BIENVENIDA_MENSAJE})
+def load_bienvenida_config() -> dict:
+    return config_db.cargar_bienvenida(datos={"mensaje": DEFAULT_BIENVENIDA_MENSAJE})
 
-def save_bienvenida_config(config):
-    return _save_json(BIENVENIDA_CONFIG_FILE, config)
+
+def save_bienvenida_config(config: dict, actualizado_por: str = ""):
+    return config_db.guardar_bienvenida(config, actualizado_por=actualizado_por)

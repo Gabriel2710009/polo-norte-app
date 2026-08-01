@@ -177,7 +177,7 @@ def _load_config():
                 "Us\u00e1 /config_postulacion para configurar los canales."
             )
     except Exception as e:
-        logger.error("Error cargando configuraci\u00f3n de postulaci\u00f3n: %s", e)
+        logger.warning("Error cargando configuraci\u00f3n de postulaci\u00f3n: %s", e)
 
 
 def tiene_permiso_entrevista(member: discord.Member) -> bool:
@@ -417,8 +417,7 @@ async def _editar_mensaje_entrevista(
 
     message = await _obtener_mensaje_entrevista(session, interaction)
     if message is None:
-        logger.error(
-            "No se pudo obtener el mensaje de la entrevista para editarlo: user=%s",
+        logger.warning("No se pudo obtener el mensaje de la entrevista para editarlo: user=%s",
             session.user_id,
         )
         return
@@ -426,14 +425,12 @@ async def _editar_mensaje_entrevista(
     try:
         await message.edit(embed=embed, view=view)
     except discord.NotFound:
-        logger.error(
-            "Mensaje de entrevista no encontrado al editar: user=%s",
+        logger.warning("Mensaje de entrevista no encontrado al editar: user=%s",
             session.user_id,
         )
         _marcar_interfaz_expirada(session, "mensaje no encontrado")
     except discord.Forbidden:
-        logger.error(
-            "Sin permisos para editar el mensaje de entrevista: user=%s",
+        logger.warning("Sin permisos para editar el mensaje de entrevista: user=%s",
             session.user_id,
         )
         _marcar_interfaz_expirada(session, "sin permisos")
@@ -463,7 +460,7 @@ async def finalizar_entrevista(session: InterviewSession):
         return
     guild = bot.get_guild(session.guild_id)
     if not guild:
-        logger.error("Guild %s no encontrada para finalizar entrevista", session.guild_id)
+        logger.warning("Guild %s no encontrada para finalizar entrevista", session.guild_id)
         active_interviews.pop(session.user_id, None)
         return
 
@@ -516,7 +513,7 @@ async def finalizar_entrevista(session: InterviewSession):
         try:
             await post_channel.send(plantilla_post)
         except Exception as e:
-            logger.error("Error enviando plantilla a canal postulaci\u00f3n: %s", e)
+            logger.warning("Error enviando plantilla a canal postulaci\u00f3n: %s", e)
 
     err_channel = bot.get_channel(postulacion_config_cache["errores_channel_id"]) if postulacion_config_cache["errores_channel_id"] else None
 
@@ -524,7 +521,7 @@ async def finalizar_entrevista(session: InterviewSession):
         try:
             await err_channel.send(plantilla_err)
         except Exception as e:
-            logger.error("Error enviando plantilla a canal errores: %s", e)
+            logger.warning("Error enviando plantilla a canal errores: %s", e)
 
     log_channel = bot.get_channel(postulacion_config_cache["log_channel_id"]) if postulacion_config_cache["log_channel_id"] else None
 
@@ -539,7 +536,7 @@ async def finalizar_entrevista(session: InterviewSession):
                     session.user_id, session.staff_id, aprobacion,
                 )
             except Exception as e:
-                logger.error("Error en aprobaci\u00f3n por entrevista: %s", e)
+                logger.warning("Error en aprobaci\u00f3n por entrevista: %s", e)
         else:
             logger.warning(
                 "Aprobaci\u00f3n saltada: miembro=%s staff=%s channel=%s",
@@ -567,7 +564,7 @@ async def finalizar_entrevista(session: InterviewSession):
             try:
                 await log_channel.send(embed=embed)
             except Exception as e:
-                logger.error("Error enviando log de aprobaci\u00f3n: %s", e)
+                logger.warning("Error enviando log de aprobaci\u00f3n: %s", e)
     else:
         try:
             entrevistas_db.incrementar_intento(str(session.user_id))
@@ -586,7 +583,7 @@ async def finalizar_entrevista(session: InterviewSession):
                     f"**Intento:** {session.intento}/{entrevistas_db.MAX_INTENTOS}"
                 )
             except Exception as e:
-                logger.error("Error enviando mensaje de rechazo: %s", e)
+                logger.warning("Error enviando mensaje de rechazo: %s", e)
 
         if log_channel and isinstance(log_channel, discord.TextChannel):
             embed = discord.Embed(
@@ -603,12 +600,12 @@ async def finalizar_entrevista(session: InterviewSession):
             try:
                 await log_channel.send(embed=embed)
             except Exception as e:
-                logger.error("Error enviando log de rechazo: %s", e)
+                logger.warning("Error enviando log de rechazo: %s", e)
 
     try:
         active_interviews.pop(session.user_id, None)
     except Exception as e:
-        logger.error("Error limpiando sesi\u00f3n activa: %s", e)
+        logger.warning("Error limpiando sesi\u00f3n activa: %s", e)
 
     _limpiar_sesion_persistida(session)
 
@@ -660,7 +657,7 @@ class PreguntaModal(Modal, title="Agregar pregunta"):
             )
             logger.info("Pregunta creada: id=%s categoria=%s por %s", q_id, self.categoria, interaction.user)
         except Exception as e:
-            logger.error("Error al agregar pregunta: %s", e)
+            logger.warning("Error al agregar pregunta: %s", e)
             await interaction.response.send_message(
                 "\u274c Ocurri\u00f3 un error al guardar la pregunta.", ephemeral=True,
             )
@@ -723,7 +720,7 @@ class EditarPreguntaModal(Modal, title="Editar pregunta"):
                     "\u274c No se encontr\u00f3 la pregunta para editar.", ephemeral=True,
                 )
         except Exception as e:
-            logger.error("Error al editar pregunta %s: %s", self.pregunta_id, e)
+            logger.warning("Error al editar pregunta %s: %s", self.pregunta_id, e)
             await interaction.response.send_message(
                 "\u274c Ocurri\u00f3 un error al editar la pregunta.", ephemeral=True,
             )
@@ -974,7 +971,7 @@ async def _recuperar_sesion(
         try:
             datos_frescos = entrevistas_db.recuperar_sesion_entrevista(str(session.user_id))
         except Exception as e:
-            logger.error("Error al re-consultar sesi\u00f3n persistida: %s", e)
+            logger.warning("Error al re-consultar sesi\u00f3n persistida: %s", e)
             datos_frescos = None
 
         if datos_frescos is None:
@@ -1282,7 +1279,7 @@ class ConfirmDeleteView(View):
                     view=None,
                 )
         except Exception as e:
-            logger.error("Error al eliminar pregunta %s: %s", self.pregunta_id, e)
+            logger.warning("Error al eliminar pregunta %s: %s", self.pregunta_id, e)
             await interaction.response.edit_message(
                 content="\u274c Ocurri\u00f3 un error al eliminar la pregunta.",
                 view=None,
@@ -1364,7 +1361,7 @@ class ConfigPreguntasGroup(app_commands.Group):
         try:
             preguntas = entrevistas_db.listar_preguntas(solo_activas=True)
         except Exception as e:
-            logger.error("Error al listar preguntas: %s", e)
+            logger.warning("Error al listar preguntas: %s", e)
             await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
             return
 
@@ -1387,7 +1384,7 @@ class ConfigPreguntasGroup(app_commands.Group):
         try:
             preguntas = entrevistas_db.listar_preguntas(solo_activas=True)
         except Exception as e:
-            logger.error("Error al listar preguntas: %s", e)
+            logger.warning("Error al listar preguntas: %s", e)
             await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
             return
 
@@ -1443,7 +1440,7 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
     try:
         sesion_persistida = entrevistas_db.recuperar_sesion_entrevista(str(usuario.id))
     except Exception as e:
-        logger.error("Error al consultar sesi\u00f3n persistida: %s", e)
+        logger.warning("Error al consultar sesi\u00f3n persistida: %s", e)
         sesion_persistida = None
 
     if sesion_persistida:
@@ -1474,12 +1471,12 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         try:
             entrevistas_db.eliminar_sesion_entrevista(str(usuario.id))
         except Exception as e:
-            logger.error("Error limpiando sesi\u00f3n terminal persistida: %s", e)
+            logger.warning("Error limpiando sesi\u00f3n terminal persistida: %s", e)
 
     try:
         intentos = entrevistas_db.obtener_intentos(str(usuario.id))
     except Exception as e:
-        logger.error("Error al obtener intentos: %s", e)
+        logger.warning("Error al obtener intentos: %s", e)
         await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
         return
 
@@ -1495,7 +1492,7 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         try:
             ultimo = entrevistas_db.obtener_ultimo_intento(str(usuario.id))
         except Exception as e:
-            logger.error("Error al obtener \u00faltimo intento: %s", e)
+            logger.warning("Error al obtener \u00faltimo intento: %s", e)
             await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
             return
 
@@ -1517,7 +1514,7 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
     try:
         stock = entrevistas_db.contar_preguntas_por_categoria()
     except Exception as e:
-        logger.error("Error al contar preguntas: %s", e)
+        logger.warning("Error al contar preguntas: %s", e)
         await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
         return
 
@@ -1545,7 +1542,7 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         armeria = entrevistas_db.seleccionar_preguntas_aleatorias("ARMERIA", 5)
         casos = entrevistas_db.seleccionar_preguntas_aleatorias("CASOS_PRACTICOS", 5)
     except Exception as e:
-        logger.error("Error al seleccionar preguntas: %s", e)
+        logger.warning("Error al seleccionar preguntas: %s", e)
         await interaction.response.send_message("\u274c Error al preparar las preguntas.", ephemeral=True)
         return
 
@@ -1619,7 +1616,7 @@ async def recuperar_entrevista(interaction: discord.Interaction, usuario: discor
     try:
         datos = entrevistas_db.recuperar_sesion_entrevista(str(usuario.id))
     except Exception as e:
-        logger.error("Error al consultar sesi\u00f3n persistida: %s", e)
+        logger.warning("Error al consultar sesi\u00f3n persistida: %s", e)
         await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
         return
 
@@ -2222,7 +2219,7 @@ class ManualIdModal(Modal, title="Configurar canales manualmente"):
             else:
                 await interaction.response.send_message("\u2139\ufe0f No se realizaron cambios.", ephemeral=True)
         except Exception as e:
-            logger.error("Error en modal de IDs manuales: %s", e)
+            logger.warning("Error en modal de IDs manuales: %s", e)
             await interaction.response.send_message("\u274c Error al actualizar la configuraci\u00f3n.", ephemeral=True)
 
 
@@ -2282,7 +2279,7 @@ class ConfigPostulacionView(View):
                 postulacion_config_cache[clave] = cid
                 exitosos.append(f"{label}: <#{cid}>")
             except Exception as e:
-                logger.error("Error guardando %s: %s", clave, e)
+                logger.warning("Error guardando %s: %s", clave, e)
                 errores.append(f"{label}: error al guardar en DB")
 
         partes = []
@@ -2345,7 +2342,7 @@ async def setup(bot):
                 "[ENTREVISTA] Sesiones viejas limpiadas al iniciar: %s", eliminadas,
             )
     except Exception as e:
-        logger.error("[ENTREVISTA] Error limpiando sesiones viejas: %s", e)
+        logger.warning("[ENTREVISTA] Error limpiando sesiones viejas: %s", e)
 
     try:
         pendientes = entrevistas_db.contar_sesiones_recuperables()
@@ -2356,7 +2353,7 @@ async def setup(bot):
                 pendientes,
             )
     except Exception as e:
-        logger.error("[ENTREVISTA] Error contando sesiones pendientes: %s", e)
+        logger.warning("[ENTREVISTA] Error contando sesiones pendientes: %s", e)
 
     bot.tree.add_command(ConfigPreguntasGroup())
     bot.tree.add_command(preguntas)

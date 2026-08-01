@@ -99,6 +99,12 @@ def init():
 
     init_toggles()
 
+    try:
+        from database import config_db
+        config_db.init()
+    except Exception as e:
+        logger.error("Error inicializando tablas de config: %s", e)
+
 
 def init_toggles():
     conn = _try_conn()

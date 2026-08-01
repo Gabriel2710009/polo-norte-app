@@ -146,37 +146,38 @@ class TestPersistencia(unittest.TestCase):
 
     def setUp(self):
         blacklist_cog._tickets_notificados.clear()
-        self._orig_file = blacklist_cog._NOTIFICADOS_FILE
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self._tmp = os.path.join(base_dir, "data", "_test_notificados.json")
-        blacklist_cog._NOTIFICADOS_FILE = self._tmp
-        if os.path.exists(self._tmp):
-            os.remove(self._tmp)
 
     def tearDown(self):
-        blacklist_cog._NOTIFICADOS_FILE = self._orig_file
         blacklist_cog._tickets_notificados.clear()
-        if os.path.exists(self._tmp):
-            os.remove(self._tmp)
 
     def test_ciclo_completo(self):
-        blacklist_cog._tickets_notificados.update([100, 200, 300])
-        blacklist_cog._persistir_notificados()
-        blacklist_cog._tickets_notificados.clear()
-        blacklist_cog._cargar_notificados()
-        self.assertEqual(blacklist_cog._tickets_notificados, {100, 200, 300})
+        stored = []
 
-    def test_sin_archivo_no_borra_existente(self):
-        blacklist_cog._tickets_notificados.add(777)
-        blacklist_cog._cargar_notificados()
-        self.assertIn(777, blacklist_cog._tickets_notificados)
+        with patch("database.config_db.guardar_notificados") as guardar, \
+             patch("database.config_db.cargar_notificados") as cargar:
+            guardar.side_effect = lambda ids: stored.extend(ids)
+            cargar.side_effect = lambda: set(stored)
 
-    def test_json_corrupto(self):
-        os.makedirs(os.path.dirname(self._tmp), exist_ok=True)
-        with open(self._tmp, "w") as f:
-            f.write("{corrupto")
-        blacklist_cog._cargar_notificados()
-        self.assertEqual(len(blacklist_cog._tickets_notificados), 0)
+            blacklist_cog._tickets_notificados.update([100, 200, 300])
+            blacklist_cog._persistir_notificados()
+            blacklist_cog._tickets_notificados.clear()
+            blacklist_cog._cargar_notificados()
+            self.assertEqual(blacklist_cog._tickets_notificados, {100, 200, 300})
+
+    def test_sin_registro_no_borra_existente(self):
+        with patch("database.config_db.cargar_notificados", return_value=set()):
+            blacklist_cog._tickets_notificados.add(777)
+            blacklist_cog._cargar_notificados()
+            self.assertIn(777, blacklist_cog._tickets_notificados)
+
+    def test_db_inaccesible_no_borra_existente(self):
+        with patch(
+            "database.config_db.cargar_notificados",
+            side_effect=Exception("sin DB"),
+        ):
+            blacklist_cog._tickets_notificados.add(777)
+            blacklist_cog._cargar_notificados()
+            self.assertEqual(blacklist_cog._tickets_notificados, {777})
 
 
 class TestScanOpenTickets(unittest.TestCase):

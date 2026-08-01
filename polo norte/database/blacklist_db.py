@@ -93,7 +93,7 @@ def agregar(discord_id: str, nombre_ic: str, motivo: str, staff_id: str,
         return False
     except Exception as e:
         conn.rollback()
-        logger.error("Error agregando blacklist: %s", e)
+        logger.warning("Error agregando blacklist: %s", e)
         raise
     finally:
         cur.close()
@@ -112,7 +112,7 @@ def eliminar(discord_id: str) -> bool:
         return eliminado
     except Exception as e:
         conn.rollback()
-        logger.error("Error eliminando blacklist: %s", e)
+        logger.warning("Error eliminando blacklist: %s", e)
         raise
     finally:
         cur.close()
@@ -231,7 +231,7 @@ def registrar_intento(discord_id: str, ticket_id: str, motivo: str = None):
         logger.info("Intento de postulaci\u00f3n registrado: discord_id=%s ticket=%s", discord_id, ticket_id)
     except Exception as e:
         conn.rollback()
-        logger.error("Error registrando intento de postulaci\u00f3n: %s", e)
+        logger.warning("Error registrando intento de postulaci\u00f3n: %s", e)
     finally:
         cur.close()
         _close_conn(conn)

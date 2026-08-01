@@ -1,6 +1,4 @@
 import re
-import os
-import json
 import logging
 import asyncio
 import discord
@@ -35,38 +33,30 @@ BLACKLIST_STAFF_ALERT_ROLE_ID = 0
 ROL_AUTORIZADO_ID = 1307612928211554386
 
 # Protección contra spam: canales ya notificados en esta sesión
-# Persistido a disco para sobrevivir reinicios.
+# Persistido en PostgreSQL (tabla tickets_notificados) para sobrevivir reinicios.
 _tickets_notificados: set[int] = set()
 
 logger_scanner = logging.getLogger("BlacklistScanner")
 
-_NOTIFICADOS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
-)
-_NOTIFICADOS_FILE = os.path.join(_NOTIFICADOS_DIR, "tickets_notificados.json")
-
 
 def _persistir_notificados():
     try:
-        os.makedirs(_NOTIFICADOS_DIR, exist_ok=True)
-        with open(_NOTIFICADOS_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(_tickets_notificados), f)
+        from database import config_db
+        config_db.guardar_notificados(_tickets_notificados)
     except Exception as e:
         logger.warning("Error persistiendo notificados: %s", e)
 
 
 def _cargar_notificados():
     try:
-        if not os.path.exists(_NOTIFICADOS_FILE):
-            logger_scanner.info("No hay registro persistente de notificados previos")
-            return
-        with open(_NOTIFICADOS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        _tickets_notificados.update(int(x) for x in data)
-        logger_scanner.info(
-            "Notificados persistentes cargados: %s tickets (evitar\u00e1 duplicados)",
-            len(_tickets_notificados),
-        )
+        from database import config_db
+        ids = config_db.cargar_notificados()
+        if ids:
+            _tickets_notificados.update(ids)
+            logger_scanner.info(
+                "Notificados persistentes cargados: %s tickets (evitar\u00e1 duplicados)",
+                len(_tickets_notificados),
+            )
     except Exception as e:
         logger.warning("Error cargando notificados persistentes: %s", e)
 
@@ -184,7 +174,7 @@ async def _notificar_blacklist(channel: discord.TextChannel, registro: dict, usu
     try:
         await channel.send(embed=embed)
     except Exception as e:
-        logger.error("Error enviando notificaci\u00f3n de blacklist a %s: %s", channel.id, e)
+        logger.warning("Error enviando notificaci\u00f3n de blacklist a %s: %s", channel.id, e)
         await log_actions.log_error(
             "\U0001f6ab Error notificaci\u00f3n blacklist",
             f"No se pudo enviar embed a <#{channel.id}>: `{e}`",
@@ -205,7 +195,7 @@ async def _enviar_embed_log(bot: commands.Bot, embed: discord.Embed):
     try:
         await canal.send(embed=embed)
     except Exception as e:
-        logger.error("Error enviando embed a canal blacklist %s: %s", BLACKLIST_LOG_CHANNEL_ID, e)
+        logger.warning("Error enviando embed a canal blacklist %s: %s", BLACKLIST_LOG_CHANNEL_ID, e)
         await log_actions.log_error(
             "\U0001f6ab Error enviando embed blacklist",
             f"No se pudo enviar embed a <#{BLACKLIST_LOG_CHANNEL_ID}>: `{e}`",
@@ -350,7 +340,7 @@ async def _ejecutar_blacklist(
                 await usuario_obj.add_roles(rol, reason="Blacklist de postulaciones")
             except Exception as e:
                 rol_ok = False
-                logger.error("No se pudo asignar rol de blacklist a %s: %s", uid, e)
+                logger.warning("No se pudo asignar rol de blacklist a %s: %s", uid, e)
                 await log_actions.log_error(
                     "\U0001f6ab Error asignando rol blacklist",
                     f"Usuario: <@{uid}>\nRol: <@&{BLACKLIST_POSTULACIONES_ROLE_ID}>\nError: `{e}`",
@@ -644,7 +634,7 @@ def _setup_blacklist_commands(bot: commands.Bot):
                     await usuario_obj.remove_roles(rol, reason="Unblacklist de postulaciones")
                 except Exception as e:
                     rol_ok = False
-                    logger.error("No se pudo remover rol de blacklist a %s: %s", uid, e)
+                    logger.warning("No se pudo remover rol de blacklist a %s: %s", uid, e)
                     await log_actions.log_error(
                         "\u2705 Error removiendo rol blacklist",
                         f"Usuario: <@{uid}>\nError: `{e}`",
@@ -1117,8 +1107,7 @@ async def check_ticket_blacklist(
         if registro:
             en_blacklist = True
     except Exception as e:
-        logger_scanner.error(
-            "[%s] Error consultando blacklist para %s: %s", origen, usuario_id, e,
+        logger_scanner.warning("[%s] Error consultando blacklist para %s: %s", origen, usuario_id, e,
         )
         if BLACKLIST_ALLOW_ROLE_FALLBACK and BLACKLIST_POSTULACIONES_ROLE_ID:
             rol = guild.get_role(BLACKLIST_POSTULACIONES_ROLE_ID)
@@ -1145,8 +1134,7 @@ async def check_ticket_blacklist(
     try:
         db.registrar_intento(str(usuario_id), str(channel.id), registro.get("motivo"))
     except Exception as e:
-        logger_scanner.error(
-            "[%s] Error registrando intento en DB para %s: %s", origen, usuario_id, e,
+        logger_scanner.warning("[%s] Error registrando intento en DB para %s: %s", origen, usuario_id, e,
         )
 
     log_actions.log_info(
@@ -1277,7 +1265,7 @@ async def _on_member_join(member: discord.Member, bot: commands.Bot):
             f"**Nombre IC:** {registro.get('nombre_ic', 'Desconocido')}",
         )
     except Exception as e:
-        logger.error("No se pudo asignar rol de blacklist a %s por reingreso: %s", member.id, e)
+        logger.warning("No se pudo asignar rol de blacklist a %s por reingreso: %s", member.id, e)
         await log_actions.log_error(
             "\U0001f6ab Error asignando rol blacklist por reingreso",
             f"Usuario: <@{member.id}>\nRol: <@&{BLACKLIST_POSTULACIONES_ROLE_ID}>\nError: `{e}`",
@@ -1349,8 +1337,7 @@ async def scan_open_tickets(bot: commands.Bot):
                     notificados += 1
             except Exception as e:
                 errores += 1
-                logger_scanner.error(
-                    "Error escaneando ticket %s en guild %s: %s",
+                logger_scanner.warning("Error escaneando ticket %s en guild %s: %s",
                     channel.id, guild.id, e,
                 )
 
