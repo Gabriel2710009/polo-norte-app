@@ -50,6 +50,7 @@ class InterviewSession:
     client: discord.Client | None = None
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     estado: str = ESTADO_ACTIVA
+    last_updated: datetime | None = None
 
 
 active_interviews: dict[int, InterviewSession] = {}
@@ -98,9 +99,16 @@ def _datos_a_session(
         except Exception:
             started_at = datetime.now(timezone.utc)
 
+    last_updated = datos.get("updated_at")
+    if isinstance(last_updated, str):
+        try:
+            last_updated = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+        except Exception:
+            last_updated = None
+
     return InterviewSession(
         user_id=int(datos["user_id"]),
-        staff_id=int(datos["staff_id"]),
+        staff_id=int(datos.get("staff_id") or 0),
         channel_id=int(datos.get("channel_id") or 0),
         guild_id=int(datos.get("guild_id") or 0),
         questions=questions,
@@ -112,10 +120,12 @@ def _datos_a_session(
         session_id=datos.get("session_id") or uuid.uuid4().hex,
         estado=datos.get("estado", ESTADO_ACTIVA),
         client=client,
+        last_updated=last_updated,
     )
 
 
 def _persistir_sesion(session: InterviewSession):
+    session.last_updated = datetime.now(timezone.utc)
     try:
         entrevistas_db.guardar_sesion_entrevista(_session_a_datos(session))
     except Exception:
@@ -436,6 +446,13 @@ async def _editar_mensaje_entrevista(
 
 async def finalizar_entrevista(session: InterviewSession):
     session.estado = ESTADO_FINALIZADA
+    try:
+        await _actualizar_y_detener_panel(session)
+    except Exception:
+        logger.exception(
+            "[ENTREVISTA] Error actualizando panel al finalizar: user=%s",
+            session.user_id,
+        )
     bot = session.client
     if bot is None:
         logger.error(
@@ -1085,6 +1102,13 @@ class RecuperarSesionView(View):
                 )
                 return
             self.session.estado = ESTADO_ABANDONADA
+            try:
+                await _actualizar_y_detener_panel(self.session)
+            except Exception:
+                logger.exception(
+                    "[ENTREVISTA] Error actualizando panel al abandonar: user=%s",
+                    self.session.user_id,
+                )
             _limpiar_sesion_persistida(self.session)
             active_interviews.pop(self.session.user_id, None)
             await interaction.response.edit_message(
@@ -1617,6 +1641,546 @@ async def recuperar_entrevista(interaction: discord.Interaction, usuario: discor
     await _recuperar_sesion(interaction, usuario, sesion)
 
 
+# ---------------------------------------------------------------------------
+# Panel de seguimiento en vivo (/entrevista_estado)
+# ---------------------------------------------------------------------------
+
+ESTADO_EMOJI = {
+    ESTADO_ACTIVA: "\U0001f7e2",      # 🟢
+    ESTADO_EXPIRADA: "\U0001f7e1",   # 🟡
+    ESTADO_FINALIZADA: "\U0001f534",  # 🔴
+    ESTADO_ABANDONADA: "\u26ab",      # ⚫
+}
+
+ESTADO_NOMBRE = {
+    ESTADO_ACTIVA: "Activa",
+    ESTADO_EXPIRADA: "Expirada (recuperable)",
+    ESTADO_FINALIZADA: "Finalizada",
+    ESTADO_ABANDONADA: "Abandonada",
+}
+
+ESTADOS_TERMINALES = (ESTADO_FINALIZADA, ESTADO_ABANDONADA)
+
+PANEL_REFRESH_INTERVAL = 1.5
+
+# panels activos: user_id -> PanelSeguimiento
+active_panels: dict[int, "PanelSeguimiento"] = {}
+
+
+def _humanizar_tiempo(segundos: float) -> str:
+    if segundos < 60:
+        return f"{int(segundos)}s"
+    minutos = int(segundos // 60)
+    rest = int(segundos % 60)
+    if minutos < 60:
+        return f"{minutos}m {rest}s"
+    horas = minutos // 60
+    minutos = minutos % 60
+    return f"{horas}h {minutos}m"
+
+
+def _timestamp_discord(dt: datetime | None) -> str:
+    if dt is None:
+        return "Desconocida"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return f"<t:{int(dt.timestamp())}:F>"
+
+
+def _obtener_snapshot_sesion(
+    user_id: int,
+    client: discord.Client,
+) -> InterviewSession | None:
+    """Devuelve el estado actual de una entrevista.
+
+    La fuente de verdad es la sesi\u00f3n en memoria (active_interviews).
+    Si no existe (p.ej. tras un reinicio del bot o si expir\u00f3), se reconstruye
+    desde la base de datos (sesiones_entrevista).
+    """
+    sesion = active_interviews.get(user_id)
+    if sesion is not None:
+        return sesion
+
+    try:
+        datos = entrevistas_db.recuperar_sesion_entrevista(str(user_id))
+    except Exception:
+        logger.exception(
+            "[ENTREVISTA] Error consultando sesi\u00f3n persistida para panel: user=%s",
+            user_id,
+        )
+        return None
+
+    if not datos:
+        return None
+
+    return _datos_a_session(datos, client)
+
+
+def _build_panel_embed(
+    session: InterviewSession,
+    miembro_staff: discord.Member | None,
+    miembro_user: discord.Member | None,
+) -> discord.Embed:
+    estado = session.estado if session.estado in ESTADO_EMOJI else ESTADO_ABANDONADA
+    emoji = ESTADO_EMOJI[estado]
+    nombre_estado = ESTADO_NOMBRE[estado]
+
+    if estado == ESTADO_ACTIVA:
+        color = discord.Color.green()
+    elif estado == ESTADO_EXPIRADA:
+        color = discord.Color.orange()
+    elif estado == ESTADO_FINALIZADA:
+        color = discord.Color.red()
+    else:
+        color = discord.Color.dark_gray()
+
+    embed = discord.Embed(
+        title=f"{emoji} Panel de seguimiento - Entrevista",
+        description=f"**Estado:** {emoji} {nombre_estado}",
+        color=color,
+        timestamp=discord.utils.utcnow(),
+    )
+
+    staff_str = miembro_staff.mention if miembro_staff else (
+        f"<@{session.staff_id}>" if session.staff_id else "Desconocido"
+    )
+    user_str = miembro_user.mention if miembro_user else (
+        f"<@{session.user_id}>" if session.user_id else "Desconocido"
+    )
+    embed.add_field(name="\U0001f465 Entrevistador", value=staff_str, inline=True)
+    embed.add_field(name="\U0001f464 Entrevistado", value=user_str, inline=True)
+    embed.add_field(
+        name="\U0001f194 Session ID",
+        value=f"`{session.session_id}`" if session.session_id else "Desconocido",
+        inline=False,
+    )
+
+    total = len(session.questions)
+    respondidas = len(session.answers)
+    embed.add_field(
+        name="\U0001f4cb Pregunta actual",
+        value=f"**Pregunta {min(session.current_index + 1, total)} de {total}**"
+        if 0 <= session.current_index < total
+        else f"Pregunta {session.current_index} de {total} (finalizada)",
+        inline=True,
+    )
+    embed.add_field(
+        name="\u270f\ufe0f Respuestas realizadas",
+        value=f"{respondidas} / {total}",
+        inline=True,
+    )
+
+    if 0 <= session.current_index < total:
+        pregunta = session.questions[session.current_index]
+        titulo = pregunta.get("categoria", "")
+        if titulo:
+            embed.add_field(
+                name="Categor\u00eda",
+                value=titulo,
+                inline=False,
+            )
+        contenido = (pregunta.get("pregunta") or "").strip()
+        if not contenido:
+            contenido = "(sin contenido)"
+        if len(contenido) > 1024:
+            contenido = contenido[:1021] + "..."
+        embed.add_field(
+            name="Contenido de la pregunta",
+            value=contenido,
+            inline=False,
+        )
+        esperada = (pregunta.get("respuesta_esperada") or "").strip()
+        if esperada:
+            texto = esperada if len(esperada) <= 1024 else esperada[:1021] + "..."
+            embed.add_field(
+                name="Respuesta esperada",
+                value=texto,
+                inline=False,
+            )
+
+    last_updated = session.last_updated or session.started_at
+    ahora = datetime.now(timezone.utc)
+    if last_updated is None:
+        ultima_actualizacion = "Desconocida"
+        tiempo_inactividad = "Desconocido"
+    else:
+        if last_updated.tzinfo is None:
+            last_updated = last_updated.replace(tzinfo=timezone.utc)
+        delta = (ahora - last_updated).total_seconds()
+        if delta < 0:
+            delta = 0
+        ultima_actualizacion = _timestamp_discord(last_updated)
+        tiempo_inactividad = _humanizar_tiempo(delta)
+
+    embed.add_field(
+        name="\U0001f552 \u00daltima actualizaci\u00f3n",
+        value=ultima_actualizacion,
+        inline=True,
+    )
+    embed.add_field(
+        name="\u23f1\ufe0f Tiempo desde \u00faltima actividad",
+        value=tiempo_inactividad,
+        inline=True,
+    )
+
+    if estado == ESTADO_EXPIRADA:
+        embed.add_field(
+            name="\u26a0\ufe0f Recuperaci\u00f3n",
+            value=(
+                "La entrevista expir\u00f3.\n"
+                "Recuperable mediante `/recuperar_entrevista`."
+            ),
+            inline=False,
+        )
+    elif estado == ESTADO_FINALIZADA:
+        embed.add_field(
+            name="\u2705 Finalizada",
+            value="La entrevista finaliz\u00f3. Panel detenido.",
+            inline=False,
+        )
+    elif estado == ESTADO_ABANDONADA:
+        embed.add_field(
+            name="\u26ab Abandonada",
+            value="La entrevista fue abandonada. Panel detenido.",
+            inline=False,
+        )
+
+    intento_max = entrevistas_db.MAX_INTENTOS
+    embed.set_footer(
+        text=(
+            f"Intento {session.intento}/{intento_max} \u2022 "
+            f"Panel de monitoreo (solo lectura) \u2014 no interfiere con el flujo"
+        ),
+    )
+    return embed
+
+
+class PanelSeguimiento:
+    """Mantiene vivo el panel de seguimiento editando el mismo mensaje.
+
+    El panel es de solo monitoreo: nunca invoca botones ni modifica el
+    flujo de la entrevista. La fuente de verdad es InterviewSession
+    (en memoria) y sesiones_entrevista (DB).
+    """
+
+    def __init__(
+        self,
+        user_id: int,
+        message_id: int,
+        channel_id: int,
+        client: discord.Client,
+    ):
+        self.user_id = user_id
+        self.message_id = message_id
+        self.channel_id = channel_id
+        self.client = client
+        self.task: asyncio.Task | None = None
+        self._stop = False
+
+    async def _refrescar(self, session: InterviewSession | None = None):
+        channel = self.client.get_channel(self.channel_id)
+        if channel is None:
+            logger.warning(
+                "[ENTREVISTA] Panel: canal %s no encontrado, deteniendo",
+                self.channel_id,
+            )
+            self._stop = True
+            active_panels.pop(self.user_id, None)
+            return None
+
+        try:
+            message = await channel.fetch_message(self.message_id)
+        except discord.NotFound:
+            logger.warning(
+                "[ENTREVISTA] Panel: mensaje %s no encontrado, deteniendo: user=%s",
+                self.message_id, self.user_id,
+            )
+            self._stop = True
+            active_panels.pop(self.user_id, None)
+            return None
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "[ENTREVISTA] Panel: no se pudo obtener mensaje %s: user=%s",
+                self.message_id, self.user_id,
+            )
+            return None
+
+        if session is None:
+            session = _obtener_snapshot_sesion(self.user_id, self.client)
+        if session is None:
+            # La sesi\u00f3n ya no existe (fue eliminada de la DB).
+            embed = discord.Embed(
+                title="\u26ab Panel de seguimiento - Entrevista",
+                description=(
+                    "**Estado:** \u26ab Abandonada\n\n"
+                    "No se encontr\u00f3 ninguna sesi\u00f3n activa o persistida."
+                ),
+                color=discord.Color.dark_gray(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.set_footer(text="Panel detenido.")
+            try:
+                await message.edit(embed=embed)
+            except Exception:
+                logger.exception(
+                    "[ENTREVISTA] Panel: no se pudo editar mensaje final: user=%s",
+                    self.user_id,
+                )
+            self._stop = True
+            active_panels.pop(self.user_id, None)
+            logger.info(
+                "[ENTREVISTA] Panel detenido (sesi\u00f3n inexistente): user=%s",
+                self.user_id,
+            )
+            return message
+
+        guild = None
+        if session.guild_id:
+            guild = self.client.get_guild(session.guild_id)
+        miembro_staff = guild.get_member(session.staff_id) if guild else None
+        miembro_user = guild.get_member(session.user_id) if guild else None
+
+        embed = _build_panel_embed(session, miembro_staff, miembro_user)
+
+        try:
+            await message.edit(embed=embed)
+        except discord.NotFound:
+            logger.warning(
+                "[ENTREVISTA] Panel: mensaje no encontrado al editar, deteniendo: user=%s",
+                self.user_id,
+            )
+            self._stop = True
+            active_panels.pop(self.user_id, None)
+            return None
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "[ENTREVISTA] Panel: no se pudo editar el mensaje: user=%s",
+                self.user_id,
+            )
+            return None
+
+        logger.info("[ENTREVISTA] Panel actualizado: user=%s", self.user_id)
+
+        if session.estado in ESTADOS_TERMINALES:
+            self._stop = True
+            active_panels.pop(self.user_id, None)
+            logger.info(
+                "[ENTREVISTA] Panel detenido (entrevista finalizada): "
+                "user=%s estado=%s session=%s",
+                self.user_id, session.estado, session.session_id,
+            )
+        return message
+
+    async def _loop(self):
+        try:
+            while not self._stop:
+                await self._refrescar()
+                if self._stop:
+                    break
+                await asyncio.sleep(PANEL_REFRESH_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info(
+                "[ENTREVISTA] Panel cancelado expl\u00edcitamente: user=%s",
+                self.user_id,
+            )
+        except Exception:
+            logger.exception(
+                "[ENTREVISTA] Error inesperado en loop del panel: user=%s",
+                self.user_id,
+            )
+            active_panels.pop(self.user_id, None)
+
+    async def actualizar_y_detener(self, session: InterviewSession):
+        """Edita el panel por \u00faltima vez (estado terminal) y lo detiene.
+
+        Garantiza que el mensaje muestre FINALIZADA/ABANDONADA incluso si la
+        sesi\u00f3n ya no est\u00e1 en memoria ni en la base de datos.
+        """
+        self._stop = True
+        session.last_updated = datetime.now(timezone.utc)
+        try:
+            await self._refrescar(session=session)
+        except Exception:
+            logger.exception(
+                "[ENTREVISTA] Panel: error en edici\u00f3n final: user=%s",
+                self.user_id,
+            )
+        finally:
+            if self.task is not None and not self.task.done():
+                self.task.cancel()
+            active_panels.pop(self.user_id, None)
+
+    def iniciar(self):
+        if self.task is not None and not self.task.done():
+            return
+        self.task = asyncio.create_task(self._loop())
+
+    def detener(self):
+        self._stop = True
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+        active_panels.pop(self.user_id, None)
+
+
+def _detener_panel_existente(user_id: int):
+    panel = active_panels.pop(user_id, None)
+    if panel is not None:
+        panel.detener()
+
+
+async def _actualizar_y_detener_panel(session: InterviewSession):
+    """Actualiza el panel con el estado terminal de la sesi\u00f3n y lo detiene."""
+    panel = active_panels.get(session.user_id)
+    if panel is None:
+        return
+    await panel.actualizar_y_detener(session)
+
+
+@app_commands.command(
+    name="entrevista_estado",
+    description="Muestra un panel en vivo del estado de una entrevista activa",
+)
+@app_commands.describe(
+    usuario="Usuario entrevistado (se detecta autom\u00e1ticamente si se usa en un ticket)",
+)
+async def entrevista_estado(
+    interaction: discord.Interaction,
+    usuario: discord.Member | None = None,
+):
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "\u274c Este comando solo puede usarse en un servidor.",
+            ephemeral=True,
+        )
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "\u274c No se pudieron verificar tus permisos.",
+            ephemeral=True,
+        )
+        return
+
+    if not tiene_permiso_entrevista(interaction.user):
+        await interaction.response.send_message(
+            "\u274c No ten\u00e9s permisos para usar este comando.\n"
+            f"Necesit\u00e1s el permiso **Administrador** o el rol <@&{ROL_AUTORIZADO_ID}>.",
+            ephemeral=True,
+        )
+        return
+
+    target_id = usuario.id if usuario is not None else None
+    if target_id is None:
+        # Detecci\u00f3n autom\u00e1tica: buscar sesi\u00f3n activa cuyo ticket sea este canal.
+        try:
+            session = _obtener_snapshot_sesion_canal(
+                interaction.channel_id, interaction.client,
+            )
+        except Exception:
+            logger.exception(
+                "[ENTREVISTA] Error al detectar sesi\u00f3n por canal: canal=%s",
+                interaction.channel_id,
+            )
+            session = None
+        if session is None:
+            await interaction.response.send_message(
+                "\u274c No se detect\u00f3 ninguna entrevista en este canal.\n"
+                "Indic\u00e1 el usuario con `usuario`.",
+                ephemeral=True,
+            )
+            return
+        target_id = session.user_id
+    else:
+        if usuario and usuario.id == interaction.user.id:
+            await interaction.response.send_message(
+                "\u274c No puedes monitorear tu propia entrevista.",
+                ephemeral=True,
+            )
+            return
+
+    sesion = _obtener_snapshot_sesion(target_id, interaction.client)
+    if sesion is None:
+        await interaction.response.send_message(
+            "\u274c No se encontr\u00f3 ninguna entrevista para ese usuario.",
+            ephemeral=True,
+        )
+        return
+
+    # El entrevistado nunca puede usar el comando (ya validado por permisos),
+    # pero adem\u00e1s bloqueamos expl\u00edcitamente por seguridad.
+    if interaction.user.id == sesion.user_id:
+        await interaction.response.send_message(
+            "\u274c El entrevistado no puede usar este comando.",
+            ephemeral=True,
+        )
+        return
+
+    guild = interaction.guild
+    miembro_staff = guild.get_member(sesion.staff_id)
+    miembro_user = guild.get_member(sesion.user_id)
+    embed_inicial = _build_panel_embed(sesion, miembro_staff, miembro_user)
+
+    await interaction.response.send_message(embed=embed_inicial, ephemeral=False)
+
+    try:
+        message = await interaction.original_response()
+    except Exception:
+        logger.exception(
+            "[ENTREVISTA] No se pudo obtener el mensaje del panel al crearlo: user=%s",
+            target_id,
+        )
+        return
+
+    _detener_panel_existente(target_id)
+
+    panel = PanelSeguimiento(
+        user_id=target_id,
+        message_id=message.id,
+        channel_id=message.channel.id,
+        client=interaction.client,
+    )
+    active_panels[target_id] = panel
+    panel.iniciar()
+
+    logger.info(
+        "[ENTREVISTA] Panel de seguimiento creado: user=%s staff=%s session=%s "
+        "mensaje=%s canal=%s",
+        target_id, interaction.user.id, sesion.session_id,
+        message.id, message.channel.id,
+    )
+
+
+def _obtener_snapshot_sesion_canal(
+    channel_id: int,
+    client: discord.Client,
+) -> InterviewSession | None:
+    """Detecta una entrevista cuyo ticket coincida con el canal actual.
+
+    Busca primero en memoria y luego en la base de datos.
+    """
+    for sesion in active_interviews.values():
+        if sesion.channel_id == channel_id:
+            return sesion
+
+    try:
+        datos = entrevistas_db.listar_sesiones_por_canal(str(channel_id))
+    except Exception:
+        logger.exception(
+            "[ENTREVISTA] Error listando sesiones por canal: canal=%s",
+            channel_id,
+        )
+        return None
+
+    if not datos:
+        return None
+
+    # Priorizar sesiones a\u00fan recuperables.
+    for d in datos:
+        if d.get("estado") in ESTADOS_RECUPERABLES:
+            return _datos_a_session(d, client)
+    return _datos_a_session(datos[0], client)
+
+
 class ManualIdModal(Modal, title="Configurar canales manualmente"):
     def __init__(self, log_id: int, err_id: int):
         super().__init__()
@@ -1797,5 +2361,6 @@ async def setup(bot):
     bot.tree.add_command(ConfigPreguntasGroup())
     bot.tree.add_command(preguntas)
     bot.tree.add_command(recuperar_entrevista)
+    bot.tree.add_command(entrevista_estado)
     bot.tree.add_command(config_postulacion)
-    logger.info("Comandos /config_preguntas, /config_postulacion, /preguntas y /recuperar_entrevista registrados")
+    logger.info("Comandos /config_preguntas, /config_postulacion, /preguntas, /recuperar_entrevista y /entrevista_estado registrados")

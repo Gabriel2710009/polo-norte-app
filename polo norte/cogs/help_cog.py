@@ -98,6 +98,29 @@ SECCIONES = [
         ),
     },
     {
+        "titulo": "\U0001f504 /recuperar_entrevista",
+        "descripcion": (
+            "Recupera la entrevista expirada de un postulante.\n\n"
+            "La entrevista debe estar en estado `EXPIRADA` (recuperable) "
+            "y haber sido iniciada por el mismo entrevistador.\n\n"
+            "**Requiere:** Administrador o rol autorizado."
+        ),
+    },
+    {
+        "titulo": "\U0001f3af /entrevista_estado",
+        "descripcion": (
+            "Abre un panel de seguimiento en vivo de una entrevista.\n\n"
+            "Muestra en tiempo real el estado (Activa/Expirada/Finalizada/Abandonada), "
+            "entrevistador, entrevistado, Session ID, pregunta actual, respuestas realizadas, "
+            "\u00faltima actualizaci\u00f3n y tiempo de inactividad.\n\n"
+            "Se actualiza autom\u00e1ticamente y es solo de monitoreo: "
+            "no interfiere con el flujo de la entrevista.\n\n"
+            "Acepta un usuario opcional, o detecta la entrevista autom\u00e1ticamente "
+            "si se ejecuta dentro del ticket.\n\n"
+            "**Requiere:** Administrador o rol autorizado."
+        ),
+    },
+    {
         "titulo": "\u2699\ufe0f /config_postulacion",
         "descripcion": (
             "Abre un panel interactivo para configurar los canales "

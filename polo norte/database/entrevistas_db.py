@@ -630,3 +630,22 @@ def contar_sesiones_recuperables() -> int:
     finally:
         cur.close()
         _close_conn(conn)
+
+
+def listar_sesiones_por_canal(canal_id: str) -> list[dict]:
+    """Devuelve todas las sesiones asociadas a un canal (ticket)."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT * FROM {_TABLE_SESIONES} "
+            "WHERE channel_id = %s ORDER BY updated_at DESC",
+            (canal_id,),
+        )
+        return _rows_to_list(cur)
+    except Exception as e:
+        logger.error("Error listando sesiones por canal %s: %s", canal_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
