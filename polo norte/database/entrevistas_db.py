@@ -1,7 +1,7 @@
 import json
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import database
@@ -12,6 +12,7 @@ _TABLE_PREGUNTAS = "preguntas_entrevista"
 _TABLE_ENTREVISTAS = "entrevistas"
 _TABLE_INTENTOS = "intentos_entrevista"
 _TABLE_CONFIG = "configuracion_postulacion"
+_TABLE_SESIONES = "sesiones_entrevista"
 
 CATEGORIAS_VALIDAS = {"GENERAL", "ARMERIA", "CASOS_PRACTICOS"}
 
@@ -106,6 +107,25 @@ def init():
         cur.execute(f"""
             INSERT INTO {_TABLE_CONFIG} (id) VALUES (1)
             ON CONFLICT (id) DO NOTHING
+        """)
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE_SESIONES} (
+                user_id TEXT PRIMARY KEY,
+                staff_id TEXT NOT NULL,
+                channel_id TEXT,
+                guild_id TEXT,
+                session_id TEXT DEFAULT '',
+                questions JSONB NOT NULL,
+                current_index INTEGER NOT NULL DEFAULT 0,
+                answers JSONB NOT NULL DEFAULT '[]'::jsonb,
+                motives JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                intento INTEGER NOT NULL DEFAULT 1,
+                started_at TIMESTAMPTZ DEFAULT NOW(),
+                estado TEXT NOT NULL DEFAULT 'ACTIVA'
+                    CHECK (estado IN ('ACTIVA', 'EXPIRADA', 'FINALIZADA', 'ABANDONADA')),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
         """)
 
         conn.commit()
@@ -477,6 +497,135 @@ def actualizar_configuracion(clave: str, valor: str, actualizado_por: str):
     except Exception as e:
         conn.rollback()
         logger.error("Error actualizando configuraci\u00f3n %s: %s", clave, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def guardar_sesion_entrevista(datos: dict):
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"INSERT INTO {_TABLE_SESIONES} "
+            "(user_id, staff_id, channel_id, guild_id, session_id, questions, current_index, "
+            "answers, motives, intento, started_at, estado) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s) "
+            f"ON CONFLICT (user_id) DO UPDATE SET "
+            f"staff_id = EXCLUDED.staff_id, channel_id = EXCLUDED.channel_id, "
+            f"guild_id = EXCLUDED.guild_id, session_id = EXCLUDED.session_id, "
+            f"questions = EXCLUDED.questions, current_index = EXCLUDED.current_index, "
+            f"answers = EXCLUDED.answers, motives = EXCLUDED.motives, "
+            f"intento = EXCLUDED.intento, started_at = EXCLUDED.started_at, "
+            f"estado = EXCLUDED.estado, updated_at = NOW()",
+            (
+                datos["user_id"],
+                datos["staff_id"],
+                datos.get("channel_id"),
+                datos.get("guild_id"),
+                datos.get("session_id", ""),
+                json.dumps(datos.get("questions", []), ensure_ascii=False, default=str),
+                datos.get("current_index", 0),
+                json.dumps(datos.get("answers", []), ensure_ascii=False, default=str),
+                json.dumps(datos.get("motives", {}) or {}, ensure_ascii=False, default=str),
+                datos.get("intento", 1),
+                datos.get("started_at"),
+                datos.get("estado", "ACTIVA"),
+            ),
+        )
+        conn.commit()
+        logger.info(
+            "[ENTREVISTA] Sesión persistida: user=%s estado=%s pregunta=%s session=%s",
+            datos["user_id"], datos.get("estado"), datos.get("current_index", 0),
+            datos.get("session_id", ""),
+        )
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error guardando sesi\u00f3n de entrevista: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def recuperar_sesion_entrevista(user_id: str) -> dict | None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT * FROM {_TABLE_SESIONES} WHERE user_id = %s",
+            (user_id,),
+        )
+        return _row_to_dict(cur)
+    except Exception as e:
+        logger.error("Error recuperando sesi\u00f3n de entrevista para %s: %s", user_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def eliminar_sesion_entrevista(user_id: str) -> bool:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"DELETE FROM {_TABLE_SESIONES} WHERE user_id = %s",
+            (user_id,),
+        )
+        conn.commit()
+        eliminado = cur.rowcount > 0
+        if eliminado:
+            logger.info("Sesi\u00f3n de entrevista eliminada: user=%s", user_id)
+        return eliminado
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error eliminando sesi\u00f3n de entrevista para %s: %s", user_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def limpiar_sesiones_antiguas(dias: int = 7) -> int:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=dias)
+        cur.execute(
+            f"DELETE FROM {_TABLE_SESIONES} WHERE updated_at < %s",
+            (cutoff,),
+        )
+        conn.commit()
+        eliminadas = cur.rowcount
+        if eliminadas:
+            logger.info(
+                "Sesiones de entrevista antiguas eliminadas (m\u00e1s de %s d\u00edas): %s",
+                dias, eliminadas,
+            )
+        return eliminadas
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error limpiando sesiones de entrevista antiguas: %s", e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def contar_sesiones_recuperables() -> int:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"SELECT COUNT(*) FROM {_TABLE_SESIONES} "
+            "WHERE estado IN ('ACTIVA', 'EXPIRADA')",
+        )
+        row = cur.fetchone()
+        return row[0] if row else 0
+    except Exception as e:
+        logger.error("Error contando sesiones de entrevista recuperables: %s", e)
         raise
     finally:
         cur.close()

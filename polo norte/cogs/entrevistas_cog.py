@@ -1,5 +1,8 @@
 import os
+import json
+import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +24,12 @@ EMOJIS = {
     "REGULAR": "<:regular:1414590371748647043>",
 }
 
+ESTADO_ACTIVA = "ACTIVA"
+ESTADO_EXPIRADA = "EXPIRADA"
+ESTADO_FINALIZADA = "FINALIZADA"
+ESTADO_ABANDONADA = "ABANDONADA"
+ESTADOS_RECUPERABLES = (ESTADO_ACTIVA, ESTADO_EXPIRADA)
+
 
 @dataclass
 class InterviewSession:
@@ -39,11 +48,100 @@ class InterviewSession:
     message: discord.Message | None = None
     message_id: int | None = None
     client: discord.Client | None = None
-    finished: bool = False
-    expired: bool = False
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    estado: str = ESTADO_ACTIVA
 
 
 active_interviews: dict[int, InterviewSession] = {}
+
+
+def _session_a_datos(session: InterviewSession) -> dict:
+    return {
+        "user_id": str(session.user_id),
+        "staff_id": str(session.staff_id),
+        "channel_id": str(session.channel_id),
+        "guild_id": str(session.guild_id),
+        "session_id": session.session_id,
+        "questions": session.questions,
+        "current_index": session.current_index,
+        "answers": session.answers,
+        "motives": session.motives,
+        "intento": session.intento,
+        "started_at": session.started_at,
+        "estado": session.estado,
+    }
+
+
+def _datos_a_session(
+    datos: dict,
+    client: discord.Client | None = None,
+) -> InterviewSession:
+    try:
+        questions = datos.get("questions", [])
+        if isinstance(questions, str):
+            questions = json.loads(questions)
+        answers = datos.get("answers", [])
+        if isinstance(answers, str):
+            answers = json.loads(answers)
+        motives_raw = datos.get("motives", {})
+        if isinstance(motives_raw, str):
+            motives_raw = json.loads(motives_raw)
+        motives = {int(k): v for k, v in (motives_raw or {}).items()}
+    except Exception:
+        logger.exception("Error deserializando sesi\u00f3n de entrevista: user=%s", datos.get("user_id"))
+        questions, answers, motives = [], [], {}
+
+    started_at = datos.get("started_at")
+    if isinstance(started_at, str):
+        try:
+            started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except Exception:
+            started_at = datetime.now(timezone.utc)
+
+    return InterviewSession(
+        user_id=int(datos["user_id"]),
+        staff_id=int(datos["staff_id"]),
+        channel_id=int(datos.get("channel_id") or 0),
+        guild_id=int(datos.get("guild_id") or 0),
+        questions=questions,
+        current_index=int(datos.get("current_index", 0)),
+        answers=answers,
+        motives=motives,
+        intento=int(datos.get("intento", 1)),
+        started_at=started_at,
+        session_id=datos.get("session_id") or uuid.uuid4().hex,
+        estado=datos.get("estado", ESTADO_ACTIVA),
+        client=client,
+    )
+
+
+def _persistir_sesion(session: InterviewSession):
+    try:
+        entrevistas_db.guardar_sesion_entrevista(_session_a_datos(session))
+    except Exception:
+        logger.exception(
+            "Error persistiendo sesi\u00f3n de entrevista: user=%s",
+            session.user_id,
+        )
+
+
+def _limpiar_sesion_persistida(session: InterviewSession):
+    try:
+        entrevistas_db.eliminar_sesion_entrevista(str(session.user_id))
+    except Exception:
+        logger.exception(
+            "Error eliminando sesi\u00f3n persistida de entrevista: user=%s",
+            session.user_id,
+        )
+
+
+def _mensaje_no_activa(session: InterviewSession) -> str:
+    if session.estado == ESTADO_EXPIRADA:
+        return (
+            "La entrevista expir\u00f3. Us\u00e1 `/recuperar_entrevista` "
+            "para continuarla."
+        )
+    return "La entrevista ya termin\u00f3."
 
 postulacion_config_cache: dict[str, int] = {
     "log_channel_id": 0,
@@ -278,6 +376,19 @@ async def _obtener_mensaje_entrevista(
     return message
 
 
+def _marcar_interfaz_expirada(session: InterviewSession, motivo: str):
+    if session.estado != ESTADO_ACTIVA:
+        return
+    session.estado = ESTADO_EXPIRADA
+    active_interviews.pop(session.user_id, None)
+    _persistir_sesion(session)
+    logger.warning(
+        "[ENTREVISTA] Interfaz expirada, sesi\u00f3n recuperable (%s): "
+        "user=%s staff=%s session=%s",
+        motivo, session.user_id, session.staff_id, session.session_id,
+    )
+
+
 async def _editar_mensaje_entrevista(
     session: InterviewSession,
     interaction: discord.Interaction | None = None,
@@ -309,11 +420,13 @@ async def _editar_mensaje_entrevista(
             "Mensaje de entrevista no encontrado al editar: user=%s",
             session.user_id,
         )
+        _marcar_interfaz_expirada(session, "mensaje no encontrado")
     except discord.Forbidden:
         logger.error(
             "Sin permisos para editar el mensaje de entrevista: user=%s",
             session.user_id,
         )
+        _marcar_interfaz_expirada(session, "sin permisos")
     except discord.HTTPException:
         logger.exception(
             "Error HTTP editando mensaje de entrevista: user=%s",
@@ -322,7 +435,7 @@ async def _editar_mensaje_entrevista(
 
 
 async def finalizar_entrevista(session: InterviewSession):
-    session.finished = True
+    session.estado = ESTADO_FINALIZADA
     bot = session.client
     if bot is None:
         logger.error(
@@ -480,10 +593,14 @@ async def finalizar_entrevista(session: InterviewSession):
     except Exception as e:
         logger.error("Error limpiando sesi\u00f3n activa: %s", e)
 
+    _limpiar_sesion_persistida(session)
+
     logger.info(
-        "Entrevista finalizada: user=%s staff=%s resultado=%s errores=%s intento=%s",
+        "[ENTREVISTA] Sesión finalizada: user=%s staff=%s resultado=%s errores=%s "
+        "intento=%s session=%s",
         session.user_id, session.staff_id,
         resultado["resultado"], resultado["errores"], session.intento,
+        session.session_id,
     )
 
 
@@ -610,9 +727,9 @@ class ReasonModal(Modal, title="Motivo de la respuesta"):
         self.add_item(self.motivo_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        if self.session.finished or self.session.expired:
+        if self.session.estado != ESTADO_ACTIVA:
             await interaction.response.send_message(
-                "La entrevista ya termin\u00f3.",
+                _mensaje_no_activa(self.session),
                 ephemeral=True,
             )
             return
@@ -629,6 +746,7 @@ class ReasonModal(Modal, title="Motivo de la respuesta"):
             if texto:
                 self.session.motives[self.session.current_index] = texto
             self.session.current_index += 1
+            _persistir_sesion(self.session)
 
             await interaction.response.defer()
 
@@ -638,7 +756,7 @@ class ReasonModal(Modal, title="Motivo de la respuesta"):
                     description="Procesando resultado...",
                     color=discord.Color.green(),
                 )
-                self.session.finished = True
+                self.session.estado = ESTADO_FINALIZADA
                 await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
                 await finalizar_entrevista(self.session)
             else:
@@ -662,17 +780,19 @@ class QuestionView(View):
     async def on_timeout(self):
         if active_interviews.get(self.session.user_id) is not self.session:
             return
-        self.session.expired = True
+        self.session.estado = ESTADO_EXPIRADA
         active_interviews.pop(self.session.user_id, None)
+        _persistir_sesion(self.session)
         logger.info(
-            "Entrevista expirada por timeout: user=%s staff=%s",
-            self.session.user_id, self.session.staff_id,
+            "[ENTREVISTA] Interfaz expirada por timeout, sesi\u00f3n recuperable: "
+            "user=%s staff=%s session=%s",
+            self.session.user_id, self.session.staff_id, self.session.session_id,
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self.session.finished or self.session.expired:
+        if self.session.estado != ESTADO_ACTIVA:
             await interaction.response.send_message(
-                "La entrevista ya termin\u00f3.",
+                _mensaje_no_activa(self.session),
                 ephemeral=True,
             )
             return False
@@ -701,9 +821,9 @@ class QuestionView(View):
         return True
 
     async def _avanzar(self, interaction: discord.Interaction, respuesta: str):
-        if self.session.finished or self.session.expired:
+        if self.session.estado != ESTADO_ACTIVA:
             await interaction.response.send_message(
-                "La entrevista ya termin\u00f3.",
+                _mensaje_no_activa(self.session),
                 ephemeral=True,
             )
             return
@@ -718,6 +838,7 @@ class QuestionView(View):
         try:
             self.session.answers.append(respuesta)
             self.session.current_index += 1
+            _persistir_sesion(self.session)
 
             if self.session.current_index >= len(self.session.questions):
                 embed = discord.Embed(
@@ -725,7 +846,7 @@ class QuestionView(View):
                     description="Procesando resultado...",
                     color=discord.Color.green(),
                 )
-                self.session.finished = True
+                self.session.estado = ESTADO_FINALIZADA
                 await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
                 await finalizar_entrevista(self.session)
             else:
@@ -749,9 +870,9 @@ class QuestionView(View):
         label="Regular",
     )
     async def regular(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.session.finished or self.session.expired:
+        if self.session.estado != ESTADO_ACTIVA:
             await interaction.response.send_message(
-                "La entrevista ya termin\u00f3.",
+                _mensaje_no_activa(self.session),
                 ephemeral=True,
             )
             return
@@ -770,9 +891,9 @@ class QuestionView(View):
         label="Mal",
     )
     async def mal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.session.finished or self.session.expired:
+        if self.session.estado != ESTADO_ACTIVA:
             await interaction.response.send_message(
-                "La entrevista ya termin\u00f3.",
+                _mensaje_no_activa(self.session),
                 ephemeral=True,
             )
             return
@@ -784,6 +905,194 @@ class QuestionView(View):
             return
         self.session.processing = True
         await interaction.response.send_modal(ReasonModal(self.session, "MAL"))
+
+
+_recovery_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_recovery_lock(user_id: int) -> asyncio.Lock:
+    lock = _recovery_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _recovery_locks[user_id] = lock
+    return lock
+
+
+async def _recuperar_sesion(
+    interaction: discord.Interaction,
+    usuario: discord.Member,
+    session: InterviewSession,
+) -> bool:
+    async with _get_recovery_lock(session.user_id):
+        if interaction.user.id != session.staff_id:
+            await interaction.response.send_message(
+                "No ten\u00e9s permisos para controlar esta entrevista.",
+                ephemeral=True,
+            )
+            logger.info(
+                "[ENTREVISTA] Recuperaci\u00f3n denegada (no es el entrevistador): "
+                "user=%s staff=%s autor=%s session=%s",
+                session.user_id, session.staff_id, interaction.user.id, session.session_id,
+            )
+            return False
+
+        existente = active_interviews.get(session.user_id)
+        if existente is not None and existente.estado == ESTADO_ACTIVA:
+            await interaction.response.send_message(
+                "Este usuario ya tiene una entrevista en curso con interfaz activa.",
+                ephemeral=True,
+            )
+            logger.info(
+                "[ENTREVISTA] Recuperaci\u00f3n denegada (ya hay interfaz activa): "
+                "user=%s session=%s",
+                session.user_id, session.session_id,
+            )
+            return False
+
+        try:
+            datos_frescos = entrevistas_db.recuperar_sesion_entrevista(str(session.user_id))
+        except Exception as e:
+            logger.error("Error al re-consultar sesi\u00f3n persistida: %s", e)
+            datos_frescos = None
+
+        if datos_frescos is None:
+            await interaction.response.send_message(
+                "Esta entrevista ya no puede recuperarse.",
+                ephemeral=True,
+            )
+            logger.info(
+                "[ENTREVISTA] Recuperaci\u00f3n denegada (sesi\u00f3n persistida inexistente): "
+                "user=%s session=%s",
+                session.user_id, session.session_id,
+            )
+            return False
+
+        estado_actual = datos_frescos.get("estado", "")
+        if (
+            estado_actual not in ESTADOS_RECUPERABLES
+            or str(session.staff_id) != datos_frescos.get("staff_id")
+        ):
+            await interaction.response.send_message(
+                "Esta entrevista ya no puede recuperarse.",
+                ephemeral=True,
+            )
+            logger.info(
+                "[ENTREVISTA] Recuperaci\u00f3n denegada (estado no recuperable): "
+                "user=%s estado=%s session=%s",
+                session.user_id, estado_actual, session.session_id,
+            )
+            return False
+
+        estado_previo = session.estado
+        session.client = interaction.client
+        session.estado = ESTADO_ACTIVA
+        session.processing = False
+        session.answered_current = False
+
+        if session.current_index >= len(session.questions):
+            embed = discord.Embed(
+                title="\U0001f4cb Entrevista finalizada",
+                description="Procesando resultado...",
+                color=discord.Color.green(),
+            )
+            session.estado = ESTADO_FINALIZADA
+            try:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            except Exception:
+                logger.exception(
+                    "[ENTREVISTA] No se pudo enviar confirmaci\u00f3n de finalizaci\u00f3n al recuperar: "
+                    "user=%s session=%s",
+                    session.user_id, session.session_id,
+                )
+            _limpiar_sesion_persistida(session)
+            await finalizar_entrevista(session)
+            logger.info(
+                "[ENTREVISTA] Recuperaci\u00f3n exitosa (sesi\u00f3n ya completa, se finaliz\u00f3): "
+                "user=%s staff=%s session=%s",
+                session.user_id, session.staff_id, session.session_id,
+            )
+            return True
+
+        embed = mostrar_pregunta_actual(session)
+        embed.add_field(name="Entrevistado", value=usuario.mention, inline=True)
+
+        view = QuestionView(session)
+        try:
+            await interaction.response.send_message(
+                embed=embed,
+                view=view,
+                ephemeral=True,
+            )
+        except Exception:
+            logger.exception(
+                "[ENTREVISTA] No se pudo reconstruir la interfaz al recuperar: "
+                "user=%s session=%s",
+                session.user_id, session.session_id,
+            )
+            session.estado = estado_previo
+            _persistir_sesion(session)
+            return False
+
+        try:
+            message = await interaction.original_response()
+        except Exception:
+            logger.exception(
+                "[ENTREVISTA] No se pudo obtener el mensaje recuperado: user=%s session=%s",
+                session.user_id, session.session_id,
+            )
+        else:
+            session.message = message
+            session.message_id = message.id
+
+        active_interviews[session.user_id] = session
+        _persistir_sesion(session)
+        logger.info(
+            "[ENTREVISTA] Recuperaci\u00f3n exitosa: user=%s staff=%s pregunta=%s/%s session=%s",
+            session.user_id, session.staff_id,
+            session.current_index + 1, len(session.questions),
+            session.session_id,
+        )
+        return True
+
+
+class RecuperarSesionView(View):
+    def __init__(self, session: InterviewSession, usuario: discord.Member):
+        super().__init__(timeout=120)
+        self.session = session
+        self.usuario = usuario
+
+    @discord.ui.button(label="Continuar entrevista", style=discord.ButtonStyle.primary)
+    async def continuar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _recuperar_sesion(interaction, self.usuario, self.session)
+
+    @discord.ui.button(label="Descartar y empezar de nuevo", style=discord.ButtonStyle.danger)
+    async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with _get_recovery_lock(self.session.user_id):
+            if interaction.user.id != self.session.staff_id:
+                await interaction.response.send_message(
+                    "No ten\u00e9s permisos para descartar esta entrevista.",
+                    ephemeral=True,
+                )
+                logger.info(
+                    "[ENTREVISTA] Descartar denegado (no es el entrevistador): "
+                    "user=%s autor=%s session=%s",
+                    self.session.user_id, interaction.user.id, self.session.session_id,
+                )
+                return
+            self.session.estado = ESTADO_ABANDONADA
+            _limpiar_sesion_persistida(self.session)
+            active_interviews.pop(self.session.user_id, None)
+            await interaction.response.edit_message(
+                content=(
+                    f"\u274c Entrevista de {self.usuario.mention} descartada.\n"
+                    "Us\u00e1 `/preguntas` de nuevo para iniciar una nueva."
+                ),
+                view=None,
+            )
+            logger.info(
+                "[ENTREVISTA] Entrevista abandonada: user=%s staff=%s session=%s",
+                self.session.user_id, self.session.staff_id, self.session.session_id,
+            )
 
 
 class CategoriaSelectView(View):
@@ -1096,20 +1405,42 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         return
 
     if usuario.id in active_interviews:
-        sesion_existente = active_interviews[usuario.id]
-        tiempo_transcurrido = datetime.now(timezone.utc) - sesion_existente.started_at
-        if tiempo_transcurrido.total_seconds() > 600:
-            del active_interviews[usuario.id]
-            logger.info(
-                "Sesi\u00f3n hu\u00e9rfana limpiada: user=%s (%.0f seg expirada)",
-                usuario.id, tiempo_transcurrido.total_seconds(),
-            )
-        else:
+        await interaction.response.send_message(
+            "\u274c Este usuario ya tiene una entrevista en curso. Finalizala antes de iniciar otra.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        sesion_persistida = entrevistas_db.recuperar_sesion_entrevista(str(usuario.id))
+    except Exception as e:
+        logger.error("Error al consultar sesi\u00f3n persistida: %s", e)
+        sesion_persistida = None
+
+    if sesion_persistida:
+        estado_db = sesion_persistida.get("estado", "")
+        if estado_db in ESTADOS_RECUPERABLES:
+            if str(interaction.user.id) != sesion_persistida.get("staff_id"):
+                await interaction.response.send_message(
+                    "\u274c Este usuario tiene una entrevista en curso iniciada por otro miembro del staff.\n"
+                    "Solo esa persona puede recuperarla.",
+                    ephemeral=True,
+                )
+                return
+            sesion_recuperable = _datos_a_session(sesion_persistida, interaction.client)
             await interaction.response.send_message(
-                "\u274c Este usuario ya tiene una entrevista en curso. Finalizala antes de iniciar otra.",
+                content=(
+                    f"\u26a0\ufe0f Se encontr\u00f3 una entrevista en curso para {usuario.mention}.\n"
+                    "Eleg\u00ed c\u00f3mo quer\u00e9s continuar:"
+                ),
+                view=RecuperarSesionView(sesion_recuperable, usuario),
                 ephemeral=True,
             )
             return
+        try:
+            entrevistas_db.eliminar_sesion_entrevista(str(usuario.id))
+        except Exception as e:
+            logger.error("Error limpiando sesi\u00f3n terminal persistida: %s", e)
 
     try:
         intentos = entrevistas_db.obtener_intentos(str(usuario.id))
@@ -1215,10 +1546,65 @@ async def preguntas(interaction: discord.Interaction, usuario: discord.Member):
         sesion.message_id = message.id
         if message.channel is not None:
             sesion.channel_id = message.channel.id
+
+    _persistir_sesion(sesion)
     logger.info(
-        "Entrevista iniciada: user=%s staff=%s intento=%s",
-        usuario.id, interaction.user.id, intentos + 1,
+        "[ENTREVISTA] Sesión creada: user=%s staff=%s intento=%s session=%s",
+        usuario.id, interaction.user.id, intentos + 1, sesion.session_id,
     )
+
+
+@app_commands.command(name="recuperar_entrevista", description="Recupera la entrevista expirada de un postulante")
+@app_commands.describe(usuario="Usuario cuya entrevista quer\u00e9s recuperar")
+async def recuperar_entrevista(interaction: discord.Interaction, usuario: discord.Member):
+    if not interaction.guild:
+        await interaction.response.send_message("\u274c Este comando solo puede usarse en un servidor.", ephemeral=True)
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("\u274c No se pudieron verificar tus permisos.", ephemeral=True)
+        return
+
+    if not tiene_permiso_entrevista(interaction.user):
+        await interaction.response.send_message(
+            "\u274c No ten\u00e9s permisos para usar este comando.\n"
+            f"Necesit\u00e1s el permiso **Administrador** o el rol <@&{ROL_AUTORIZADO_ID}>.",
+            ephemeral=True,
+        )
+        return
+
+    if usuario.id in active_interviews:
+        sesion_viva = active_interviews[usuario.id]
+        if sesion_viva.estado == ESTADO_ACTIVA:
+            await interaction.response.send_message(
+                "Este usuario ya tiene una entrevista en curso con interfaz activa.",
+                ephemeral=True,
+            )
+            return
+
+    try:
+        datos = entrevistas_db.recuperar_sesion_entrevista(str(usuario.id))
+    except Exception as e:
+        logger.error("Error al consultar sesi\u00f3n persistida: %s", e)
+        await interaction.response.send_message("\u274c Error al consultar la base de datos.", ephemeral=True)
+        return
+
+    if not datos or datos.get("estado") not in ESTADOS_RECUPERABLES:
+        await interaction.response.send_message(
+            "No hay ninguna entrevista recuperable para este usuario.",
+            ephemeral=True,
+        )
+        return
+
+    if str(interaction.user.id) != datos.get("staff_id"):
+        await interaction.response.send_message(
+            "Esta entrevista fue iniciada por otro miembro del staff. Solo esa persona puede recuperarla.",
+            ephemeral=True,
+        )
+        return
+
+    sesion = _datos_a_session(datos, interaction.client)
+    await _recuperar_sesion(interaction, usuario, sesion)
 
 
 class ManualIdModal(Modal, title="Configurar canales manualmente"):
@@ -1377,7 +1763,29 @@ async def config_postulacion(interaction: discord.Interaction):
 async def setup(bot):
     entrevistas_db.init()
     _load_config()
+
+    try:
+        eliminadas = entrevistas_db.limpiar_sesiones_antiguas()
+        if eliminadas:
+            logger.info(
+                "[ENTREVISTA] Sesiones viejas limpiadas al iniciar: %s", eliminadas,
+            )
+    except Exception as e:
+        logger.error("[ENTREVISTA] Error limpiando sesiones viejas: %s", e)
+
+    try:
+        pendientes = entrevistas_db.contar_sesiones_recuperables()
+        if pendientes:
+            logger.info(
+                "[ENTREVISTA] Sesiones pendientes de recuperaci\u00f3n en DB al iniciar: %s "
+                "(us\u00e9 /recuperar_entrevista para continuarlas)",
+                pendientes,
+            )
+    except Exception as e:
+        logger.error("[ENTREVISTA] Error contando sesiones pendientes: %s", e)
+
     bot.tree.add_command(ConfigPreguntasGroup())
     bot.tree.add_command(preguntas)
+    bot.tree.add_command(recuperar_entrevista)
     bot.tree.add_command(config_postulacion)
-    logger.info("Comandos /config_preguntas, /config_postulacion y /preguntas registrados")
+    logger.info("Comandos /config_preguntas, /config_postulacion, /preguntas y /recuperar_entrevista registrados")
