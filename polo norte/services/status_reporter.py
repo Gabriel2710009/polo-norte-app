@@ -1,4 +1,3 @@
-import os
 import time
 import asyncio
 import logging
@@ -9,8 +8,11 @@ from services import log_actions
 
 logger = logging.getLogger("StatusReporter")
 
+ADMIN_USER_ID = 691475896019714139
+REPORT_INTERVAL_MINUTES = 30
+
 _bot = None
-_admin_user_id = None
+_admin_user_id = ADMIN_USER_ID
 _start_time = None
 _last_heartbeat = None
 _error_count = 0
@@ -19,7 +21,7 @@ _disconnect_count = 0
 _hubo_error_critico = False
 _recent_errors = []
 _RECENT_ERRORS_MAX = 10
-_report_interval = 30 * 60
+_report_interval = REPORT_INTERVAL_MINUTES * 60
 _loop_started = False
 _startup_sent = False
 
@@ -44,18 +46,10 @@ def _resumir_error(error, contexto=None):
     return resumen
 
 
-def setup(bot, admin_user_id=None, report_interval_minutes=None):
-    global _bot, _admin_user_id, _report_interval, _start_time, _loop_started
+def setup(bot):
+    global _bot, _report_interval, _start_time, _loop_started
     _bot = bot
-    if admin_user_id:
-        _admin_user_id = int(admin_user_id)
-    if report_interval_minutes is None:
-        report_interval_minutes = os.getenv("STATUS_REPORT_INTERVAL_MINUTES", "30")
-    try:
-        interval = int(report_interval_minutes)
-    except (ValueError, TypeError):
-        interval = 30
-    _report_interval = max(1, interval) * 60
+    _report_interval = REPORT_INTERVAL_MINUTES * 60
     _start_time = time.time()
     if not _loop_started:
         _loop_started = True
@@ -63,7 +57,7 @@ def setup(bot, admin_user_id=None, report_interval_minutes=None):
         bot.loop.create_task(_periodic_loop())
     logger.info(
         "StatusReporter configurado. Intervalo: %s min, Admin: %s",
-        _report_interval // 60, _admin_user_id,
+        REPORT_INTERVAL_MINUTES, _admin_user_id,
     )
 
 
@@ -148,7 +142,7 @@ async def _get_admin_user():
 
 async def _send_dm(embed=None, content=None):
     if not _admin_user_id:
-        logger.warning("STATUS_REPORT_USER_ID no configurado. Se omite el envío de DM del monitor.")
+        logger.warning("No hay ID de administrador configurado. Se omite el envío de DM del monitor.")
         return False
     try:
         user = await _get_admin_user()

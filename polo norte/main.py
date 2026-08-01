@@ -46,9 +46,6 @@ BLACKLIST_ALLOW_ROLE_FALLBACK = os.getenv("BLACKLIST_ALLOW_ROLE_FALLBACK", "true
 BLACKLIST_STAFF_ALERT_CHANNEL_ID = int(os.getenv("BLACKLIST_STAFF_ALERT_CHANNEL_ID", 0))
 BLACKLIST_STAFF_ALERT_ROLE_ID = int(os.getenv("BLACKLIST_STAFF_ALERT_ROLE_ID", 0))
 
-STATUS_REPORT_USER_ID = int(os.getenv("STATUS_REPORT_USER_ID", 0)) or None
-STATUS_REPORT_INTERVAL_MINUTES = os.getenv("STATUS_REPORT_INTERVAL_MINUTES", "30")
-
 ITEMS_ACTIVO = False
 FICHAJE_ACTIVO = False
 TASER_DM_ACTIVO = False
@@ -75,11 +72,7 @@ async def on_ready():
     await aprobar.setup(bot)
 
     try:
-        status_reporter.setup(
-            bot,
-            admin_user_id=STATUS_REPORT_USER_ID,
-            report_interval_minutes=STATUS_REPORT_INTERVAL_MINUTES,
-        )
+        status_reporter.setup(bot)
     except Exception as e:
         logger.warning("Error configurando StatusReporter: %s", e)
 

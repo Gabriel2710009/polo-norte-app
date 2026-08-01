@@ -13,7 +13,7 @@ from services import status_reporter
 
 def _reset():
     status_reporter._bot = None
-    status_reporter._admin_user_id = None
+    status_reporter._admin_user_id = status_reporter.ADMIN_USER_ID
     status_reporter._start_time = time.time()
     status_reporter._last_heartbeat = None
     status_reporter._error_count = 0
@@ -82,7 +82,6 @@ class TestMensajeInicio(unittest.TestCase):
 
     def setUp(self):
         _reset()
-        status_reporter._admin_user_id = 691475896019714139
 
     def test_envia_mensaje_de_inicio_con_nombre(self):
         status_reporter._bot = _bot_mock(comandos=18)
@@ -131,7 +130,6 @@ class TestReportePeriodico(unittest.TestCase):
 
     def setUp(self):
         _reset()
-        status_reporter._admin_user_id = 691475896019714139
         status_reporter._start_time = time.time() - (14 * 3600 + 32 * 60)
 
     def _enviar(self, **kwargs):
@@ -205,24 +203,24 @@ class TestLoopPeriodico(unittest.TestCase):
             asyncio.run(run())
         self.assertEqual(mock_envio.await_count, 1)
 
-    def test_setup_inicia_loop_con_intervalo_env(self):
+    def test_setup_inicia_loop(self):
         status_reporter._loop_started = False
 
         async def _dummy_loop():
             await asyncio.sleep(0)
 
-        with patch("os.getenv", return_value="15"), \
-             patch.object(status_reporter, "_periodic_loop", side_effect=_dummy_loop) as mock_loop:
+        with patch.object(status_reporter, "_periodic_loop", side_effect=_dummy_loop) as mock_loop:
             loop = asyncio.new_event_loop()
             bot = Mock()
             bot.loop = loop
             with patch.object(loop, "create_task", wraps=loop.create_task) as mock_task:
-                status_reporter.setup(bot, admin_user_id=123)
+                status_reporter.setup(bot)
                 loop.run_until_complete(asyncio.sleep(0))
                 loop.run_until_complete(asyncio.sleep(0))
                 loop.close()
             mock_loop.assert_called_once()
-            self.assertEqual(status_reporter._report_interval, 15 * 60)
+            self.assertEqual(status_reporter._report_interval, 30 * 60)
+            self.assertEqual(status_reporter._admin_user_id, status_reporter.ADMIN_USER_ID)
             self.assertTrue(mock_task.called)
 
     def test_estado_guardado(self):
