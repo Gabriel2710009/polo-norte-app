@@ -147,6 +147,19 @@ async def _enviar_auditoria(
         await log_channel.send(embed=embed)
 
 
+async def _editar_respuesta_aprobacion(
+    interaction: discord.Interaction,
+    contenido: str,
+    estado: str,
+):
+    logger.info("Actualizando mensaje de aprobaci\u00f3n: %s", estado)
+    try:
+        await interaction.edit_original_response(content=contenido)
+        logger.info("Mensaje actualizado correctamente")
+    except Exception:
+        logger.exception("Error editando mensaje de aprobaci\u00f3n")
+
+
 async def _enviar_felicitaciones(channel: discord.TextChannel, member: discord.Member):
     guild_id = channel.guild.id
     url_canal = f"https://discord.com/channels/{guild_id}/{CANAL_SOLICITUD_ID}"
@@ -264,52 +277,77 @@ async def aprobar(interaction: discord.Interaction, usuario: discord.Member):
         return
 
     await interaction.response.send_message("\u23f3 Procesando resultado...", ephemeral=True)
-    msg = await interaction.original_response()
 
-    resultado = await ejecutar_aprobacion(usuario, admin, canal, origen="comando")
+    try:
+        resultado = await ejecutar_aprobacion(usuario, admin, canal, origen="comando")
 
-    mensaje = resultado.get("mensaje")
-    if "mensaje" not in resultado:
-        logger.warning("Resultado de ejecutar_aprobacion sin 'mensaje'. Keys recibidas: %s", list(resultado.keys()))
+        mensaje = resultado.get("mensaje")
+        if "mensaje" not in resultado:
+            logger.warning("Resultado de ejecutar_aprobacion sin 'mensaje'. Keys recibidas: %s", list(resultado.keys()))
 
-    if mensaje == "sin_cambios":
-        await msg.edit(content=f"\u2139\ufe0f {usuario.mention} ya tiene todos los roles asignados y no posee roles a eliminar.")
-        return
+        if mensaje == "sin_cambios":
+            await _editar_respuesta_aprobacion(
+                interaction,
+                f"\u2139\ufe0f {usuario.mention} ya tiene todos los roles asignados y no posee roles a eliminar.",
+                "sin_cambios",
+            )
+            return
 
-    if mensaje == "todos_bloqueados":
-        await msg.edit(content="\u274c No se puede asignar ning\u00fan rol por jerarqu\u00eda. Revis\u00e1 la posici\u00f3n del bot.")
-        return
+        if mensaje == "todos_bloqueados":
+            await _editar_respuesta_aprobacion(
+                interaction,
+                "\u274c No se puede asignar ning\u00fan rol por jerarqu\u00eda. Revis\u00e1 la posici\u00f3n del bot.",
+                "todos_bloqueados",
+            )
+            return
 
-    partes = []
+        if mensaje == "bot_sin_permisos":
+            await _editar_respuesta_aprobacion(
+                interaction,
+                "\u274c No se pudo completar la aprobaci\u00f3n.\n\n"
+                "El bot no tiene permisos suficientes para gestionar roles.\n"
+                "Revisa que tenga permiso Manage Roles y que su rol est\u00e9 por encima de los roles asignados.",
+                "bot_sin_permisos",
+            )
+            return
 
-    if resultado["bloqueados"]:
-        bloqueados_str = "\n".join(f"\u2022 <@&{bid}>" for bid in resultado["bloqueados"])
-        partes.append(f"\u26a0\ufe0f Roles bloqueados por jerarqu\u00eda:\n{bloqueados_str}")
+        partes = []
 
-    if resultado["exito"]:
-        exito_partes = [f"\u2705 {usuario.mention} fue aprobado correctamente."]
-        if resultado["asignados"]:
-            exito_partes.append(f"Roles asignados: {resultado['asignados']}")
-        if resultado["eliminados"]:
-            exito_partes.append(f"Roles eliminados: {resultado['eliminados']}")
-        partes.append("\n".join(exito_partes))
-    else:
-        errores_partes = [f"\u26a0\ufe0f Aprobaci\u00f3n completada con errores."]
-        errores_partes.append(f"\u2705 Asignados: {resultado['asignados']}")
-        if resultado["eliminados"]:
-            errores_partes[0] += f" | \U0001f5d1\ufe0f Eliminados: {resultado['eliminados']}"
         if resultado["bloqueados"]:
-            ids_bloq = ", ".join(f"<@&{bid}>" for bid in resultado["bloqueados"])
-            errores_partes.append(f"\u26d4 Bloqueados por jerarqu\u00eda: {ids_bloq}")
-        if resultado["errores_asignar"]:
-            ids_err = ", ".join(f"<@&{eid}>" for eid in resultado["errores_asignar"])
-            errores_partes.append(f"\u274c Error al asignar: {ids_err}")
-        if resultado["errores_eliminar"]:
-            ids_err = ", ".join(f"<@&{eid}>" for eid in resultado["errores_eliminar"])
-            errores_partes.append(f"\u274c Error al eliminar: {ids_err}")
-        partes.append("\n".join(errores_partes))
+            bloqueados_str = "\n".join(f"\u2022 <@&{bid}>" for bid in resultado["bloqueados"])
+            partes.append(f"\u26a0\ufe0f Roles bloqueados por jerarqu\u00eda:\n{bloqueados_str}")
 
-    await msg.edit(content="\n".join(partes))
+        if resultado["exito"]:
+            exito_partes = [f"\u2705 {usuario.mention} fue aprobado correctamente."]
+            if resultado["asignados"]:
+                exito_partes.append(f"Roles asignados: {resultado['asignados']}")
+            if resultado["eliminados"]:
+                exito_partes.append(f"Roles eliminados: {resultado['eliminados']}")
+            partes.append("\n".join(exito_partes))
+        else:
+            errores_partes = [f"\u26a0\ufe0f Aprobaci\u00f3n completada con errores."]
+            errores_partes.append(f"\u2705 Asignados: {resultado['asignados']}")
+            if resultado["eliminados"]:
+                errores_partes[0] += f" | \U0001f5d1\ufe0f Eliminados: {resultado['eliminados']}"
+            if resultado["bloqueados"]:
+                ids_bloq = ", ".join(f"<@&{bid}>" for bid in resultado["bloqueados"])
+                errores_partes.append(f"\u26d4 Bloqueados por jerarqu\u00eda: {ids_bloq}")
+            if resultado["errores_asignar"]:
+                ids_err = ", ".join(f"<@&{eid}>" for eid in resultado["errores_asignar"])
+                errores_partes.append(f"\u274c Error al asignar: {ids_err}")
+            if resultado["errores_eliminar"]:
+                ids_err = ", ".join(f"<@&{eid}>" for eid in resultado["errores_eliminar"])
+                errores_partes.append(f"\u274c Error al eliminar: {ids_err}")
+            partes.append("\n".join(errores_partes))
+
+        await _editar_respuesta_aprobacion(interaction, "\n".join(partes), mensaje or "con_cambios")
+    except Exception:
+        logger.exception("Error procesando aprobaci\u00f3n")
+        await _editar_respuesta_aprobacion(
+            interaction,
+            "\u274c Error procesando aprobaci\u00f3n. Revisa los logs.",
+            "error_interno",
+        )
 
 
 async def setup(bot):
