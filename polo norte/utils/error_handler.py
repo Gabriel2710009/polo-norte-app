@@ -16,15 +16,21 @@ async def reportar_error(
     error: Exception,
     contexto: str = "",
     interaction: discord.Interaction | None = None,
+    bot=None,
+    es_critico: bool = False,
 ):
     """
     Función central para reportar errores críticos.
-    1. Loguea con logger.exception()
-    2. Intenta enviar DM al OWNER_ID con embed de error.
-    3. Si falla el DM, solo loguea warning.
-    4. Nunca rompe el bot.
+    1. Alimenta el monitor (StatusReporter) con contador y resumen.
+    2. Loguea con logger.exception()
+    3. Intenta enviar DM al OWNER_ID con embed de error.
+    4. Si falla el DM, solo loguea warning.
+    5. Nunca rompe el bot.
     """
     global OWNER_ID
+    from services import status_reporter
+    status_reporter.report_error(error, contexto=contexto or None, es_critico=es_critico)
+
     if OWNER_ID is None:
         logger.warning("OWNER_ID no configurado, no se puede enviar DM de error")
         return
@@ -37,19 +43,19 @@ async def reportar_error(
     import os
     archivo = "desconocido"
     linea = 0
-    if error.__traceback__:
-        frame = error.__traceback__.tb_frame
-        while frame:
-            archivo = os.path.basename(frame.f_code.co_filename)
-            linea = frame.f_lineno
-            frame = frame.f_next
+    tb_iter = error.__traceback__
+    while tb_iter:
+        frame = tb_iter.tb_frame
+        archivo = os.path.basename(frame.f_code.co_filename)
+        linea = tb_iter.tb_lineno
+        tb_iter = tb_iter.tb_next
 
     embed = discord.Embed(
         title="🔴 ERROR",
         color=discord.Color.red(),
     )
 
-    desc = f"❌ [{contexto}] Error: {error}"
+    desc = f"❌ [{contexto}] Error ocurrido: {error}"
     embed.description = f"```\n{desc[:1024]}\n```"
 
     if len(tb) > 1024:
@@ -60,24 +66,29 @@ async def reportar_error(
     embed.set_footer(text=f"Polo Norte | {archivo}:{linea}")
 
     try:
-        user = await _get_owner(interaction)
+        user = await _get_owner(interaction, bot)
         if user:
-            await user.send(embed=embed)
+            await user.send(content="Me romp\u00ed \U0001f480", embed=embed)
     except discord.Forbidden:
         logger.warning("No se pudo enviar DM de error al owner (Forbidden)")
     except Exception as e:
         logger.warning("Error enviando DM de error: %s", e)
 
 
-async def _get_owner(interaction=None):
-    """Intenta obtener el usuario owner desde un interaction o desde el bot."""
+async def _get_owner(interaction=None, bot=None):
+    """Resuelve el owner desde interaction.client, bot, o cualquier referencia disponible."""
     global OWNER_ID
+    client = None
     if interaction and interaction.client:
-        try:
-            return await interaction.client.fetch_user(OWNER_ID)
-        except:
-            pass
-    return None
+        client = interaction.client
+    elif bot is not None and hasattr(bot, "fetch_user"):
+        client = bot
+    if client is None:
+        return None
+    try:
+        return await client.fetch_user(OWNER_ID)
+    except Exception:
+        return None
 
 
 class ErrorCog(commands.Cog):
@@ -88,11 +99,11 @@ class ErrorCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: Exception):
-        await reportar_error(error, contexto=f"Comando {ctx.command}", interaction=None)
+        await reportar_error(error, contexto=f"Comando {ctx.command}", bot=ctx.bot)
 
     @commands.Cog.listener()
     async def on_view_error(self, view, error: Exception):
-        await reportar_error(error, contexto=f"View {type(view).__name__}", interaction=None)
+        await reportar_error(error, contexto=f"View {type(view).__name__}", bot=self.bot)
 
 
 _setup_ejecutado = False

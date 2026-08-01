@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import logging
 import discord
@@ -12,6 +13,7 @@ from utils.parser import parse_embed
 from cogs import fichaje
 from services import log_actions
 from services import aprobar
+from services import status_reporter
 from cogs import config_aprobar_cog
 from cogs import bienvenida_cog
 from cogs import blacklist_cog
@@ -44,6 +46,9 @@ BLACKLIST_ALLOW_ROLE_FALLBACK = os.getenv("BLACKLIST_ALLOW_ROLE_FALLBACK", "true
 BLACKLIST_STAFF_ALERT_CHANNEL_ID = int(os.getenv("BLACKLIST_STAFF_ALERT_CHANNEL_ID", 0))
 BLACKLIST_STAFF_ALERT_ROLE_ID = int(os.getenv("BLACKLIST_STAFF_ALERT_ROLE_ID", 0))
 
+STATUS_REPORT_USER_ID = int(os.getenv("STATUS_REPORT_USER_ID", 0)) or None
+STATUS_REPORT_INTERVAL_MINUTES = os.getenv("STATUS_REPORT_INTERVAL_MINUTES", "30")
+
 ITEMS_ACTIVO = False
 FICHAJE_ACTIVO = False
 TASER_DM_ACTIVO = False
@@ -69,6 +74,15 @@ async def on_ready():
     log_actions.setup(bot, LOG_CHANNEL_ID)
     await aprobar.setup(bot)
 
+    try:
+        status_reporter.setup(
+            bot,
+            admin_user_id=STATUS_REPORT_USER_ID,
+            report_interval_minutes=STATUS_REPORT_INTERVAL_MINUTES,
+        )
+    except Exception as e:
+        logger.warning("Error configurando StatusReporter: %s", e)
+
     blacklist_cog.BLACKLIST_POSTULACIONES_ROLE_ID = BLACKLIST_POSTULACIONES_ROLE_ID
     blacklist_cog.BLACKLIST_LOG_CHANNEL_ID = BLACKLIST_LOG_CHANNEL_ID
     blacklist_cog.POSTULACIONES_CATEGORY_ID = POSTULACIONES_CATEGORY_ID
@@ -88,6 +102,7 @@ async def on_ready():
         log_actions.log_info("\u2705 DB inicializada", "Conexi\u00f3n a PostgreSQL establecida y tablas listas.")
     except Exception as e:
         logger.error("Error inicializando DB: %s", e)
+        status_reporter.report_error(e, contexto="Inicialización DB", es_critico=True)
         await log_actions.log_error("\u274c Error DB", f"No se pudo inicializar la base de datos:\n`{e}`")
         return
 
@@ -121,6 +136,11 @@ async def on_ready():
     except Exception as e:
         logger.error("Error sincronizando comandos: %s", e)
         await log_actions.log_error("\u274c Error sync", f"No se pudieron sincronizar los comandos slash:\n`{e}`")
+
+    try:
+        await status_reporter.send_startup_message()
+    except Exception as e:
+        logger.warning("No se pudo enviar el mensaje de inicio del monitor: %s", e)
 
     try:
         fichaje.iniciar_recordatorio_loop(bot, ALERT_CHANNEL_ID)
@@ -351,7 +371,24 @@ async def estado(interaction: discord.Interaction):
 @bot.event
 async def on_error(event: str, *args, **kwargs):
     logger.error("Error no manejado en evento %s", event, exc_info=True)
+    exc = sys.exc_info()[1] or Exception("Error desconocido")
+    status_reporter.report_error(exc, contexto=f"Evento {event}", es_critico=True)
     await log_actions.log_error(f"\u274c Error en evento {event}", f"```py\n{args}\n{kwargs}\n```")
+
+
+@bot.event
+async def on_disconnect():
+    status_reporter.register_disconnect()
+
+
+@bot.event
+async def on_resumed():
+    status_reporter.register_reconnect()
+
+
+@bot.event
+async def on_connect():
+    status_reporter.register_connect()
 
 
 if __name__ == "__main__":
