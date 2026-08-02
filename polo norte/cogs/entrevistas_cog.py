@@ -30,6 +30,15 @@ ESTADO_FINALIZADA = "FINALIZADA"
 ESTADO_ABANDONADA = "ABANDONADA"
 ESTADOS_RECUPERABLES = (ESTADO_ACTIVA, ESTADO_EXPIRADA)
 
+# Tiempo máximo que un modal de motivo puede permanecer abierto sin respuesta.
+# Si se descarta (ESC / clic afuera) o nunca se envía, la entrevista se
+# desbloquea automáticamente para poder reabrir el modal.
+MODAL_TIMEOUT = 300
+
+# Ventana de carrera: una segunda interacción con el botón dentro de este lapso
+# se considera doble clic y se rechaza; más allá, el modal ya no está abierto.
+MODAL_RACE_WINDOW = 3.0
+
 
 @dataclass
 class InterviewSession:
@@ -45,6 +54,9 @@ class InterviewSession:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     processing: bool = False
     answered_current: bool = False
+    modal_open: bool = False
+    modal_opened_at: datetime | None = None
+    modal_tipo: str | None = None
     message: discord.Message | None = None
     message_id: int | None = None
     client: discord.Client | None = None
@@ -70,6 +82,11 @@ def _session_a_datos(session: InterviewSession) -> dict:
         "intento": session.intento,
         "started_at": session.started_at,
         "estado": session.estado,
+        "processing": session.processing,
+        "answered_current": session.answered_current,
+        "modal_open": session.modal_open,
+        "modal_opened_at": session.modal_opened_at,
+        "modal_tipo": session.modal_tipo,
     }
 
 
@@ -106,6 +123,13 @@ def _datos_a_session(
         except Exception:
             last_updated = None
 
+    modal_opened_at = datos.get("modal_opened_at")
+    if isinstance(modal_opened_at, str):
+        try:
+            modal_opened_at = datetime.fromisoformat(modal_opened_at.replace("Z", "+00:00"))
+        except Exception:
+            modal_opened_at = None
+
     return InterviewSession(
         user_id=int(datos["user_id"]),
         staff_id=int(datos.get("staff_id") or 0),
@@ -121,6 +145,11 @@ def _datos_a_session(
         estado=datos.get("estado", ESTADO_ACTIVA),
         client=client,
         last_updated=last_updated,
+        processing=bool(datos.get("processing", False)),
+        answered_current=bool(datos.get("answered_current", False)),
+        modal_open=bool(datos.get("modal_open", False)),
+        modal_opened_at=modal_opened_at,
+        modal_tipo=datos.get("modal_tipo"),
     )
 
 
@@ -143,6 +172,60 @@ def _limpiar_sesion_persistida(session: InterviewSession):
             "Error eliminando sesi\u00f3n persistida de entrevista: user=%s",
             session.user_id,
         )
+
+
+def _modal_abandonado(session: InterviewSession) -> bool:
+    """Indica si el modal de motivo abierto fue abandonado (nunca enviado).
+
+    Si no hay modal registrado o lleva abierto m\u00e1s de MODAL_TIMEOUT, se
+    considera abandonado y la entrevista debe desbloquearse.
+    """
+    if not session.modal_open or session.modal_opened_at is None:
+        return False
+    opened = session.modal_opened_at
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - opened).total_seconds() > MODAL_TIMEOUT
+
+
+def _desbloquear_modal(session: InterviewSession, motivo: str):
+    """Desbloquea una entrevista tras un modal abandonado.
+
+    Resetea los flags de modal y de procesamiento para que el entrevistador
+    pueda reabrir el modal (Regular/Mal) sin reiniciar el bot ni borrar la
+    sesi\u00f3n de la base de datos.
+    """
+    session.processing = False
+    session.answered_current = False
+    session.modal_open = False
+    session.modal_opened_at = None
+    session.modal_tipo = None
+    _persistir_sesion(session)
+    logger.info(
+        "[ENTREVISTA] Modal abandonado, entrevista desbloqueada (%s): "
+        "user=%s staff=%s session=%s",
+        motivo, session.user_id, session.staff_id, session.session_id,
+    )
+
+
+async def _limpiar_modales_abandonados():
+    """Task de fondo que desbloquea entrevistas con modales abandonados."""
+    while True:
+        ahora = datetime.now(timezone.utc)
+        for session in list(active_interviews.values()):
+            try:
+                if session.modal_open and session.modal_opened_at is not None:
+                    opened = session.modal_opened_at
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=timezone.utc)
+                    if (ahora - opened).total_seconds() > MODAL_TIMEOUT:
+                        _desbloquear_modal(session, "timeout del task de limpieza")
+            except Exception:
+                logger.exception(
+                    "[ENTREVISTA] Error limpiando modal abandonado: user=%s",
+                    session.user_id,
+                )
+        await asyncio.sleep(60)
 
 
 def _mensaje_no_activa(session: InterviewSession) -> str:
@@ -390,6 +473,10 @@ def _marcar_interfaz_expirada(session: InterviewSession, motivo: str):
     if session.estado != ESTADO_ACTIVA:
         return
     session.estado = ESTADO_EXPIRADA
+    session.processing = False
+    session.modal_open = False
+    session.modal_opened_at = None
+    session.modal_tipo = None
     active_interviews.pop(session.user_id, None)
     _persistir_sesion(session)
     logger.warning(
@@ -728,7 +815,7 @@ class EditarPreguntaModal(Modal, title="Editar pregunta"):
 
 class ReasonModal(Modal, title="Motivo de la respuesta"):
     def __init__(self, session: InterviewSession, tipo: str):
-        super().__init__()
+        super().__init__(timeout=MODAL_TIMEOUT)
         self.session = session
         self.tipo = tipo
         self.motivo_input = TextInput(
@@ -740,49 +827,84 @@ class ReasonModal(Modal, title="Motivo de la respuesta"):
         )
         self.add_item(self.motivo_input)
 
+    async def on_timeout(self) -> None:
+        if active_interviews.get(self.session.user_id) is not self.session:
+            return
+        _desbloquear_modal(self.session, "timeout del modal")
+
     async def on_submit(self, interaction: discord.Interaction):
-        if self.session.estado != ESTADO_ACTIVA:
-            await interaction.response.send_message(
-                _mensaje_no_activa(self.session),
-                ephemeral=True,
-            )
-            return
-        if self.session.answered_current:
-            await interaction.response.send_message(
-                "Esta pregunta ya fue procesada.",
-                ephemeral=True,
-            )
-            return
-        self.session.answered_current = True
-        try:
-            self.session.answers.append(self.tipo)
-            texto = self.motivo_input.value.strip()
-            if texto:
-                self.session.motives[self.session.current_index] = texto
-            self.session.current_index += 1
-            _persistir_sesion(self.session)
-
-            await interaction.response.defer()
-
-            if self.session.current_index >= len(self.session.questions):
-                embed = discord.Embed(
-                    title="\U0001f4cb Entrevista finalizada",
-                    description="Procesando resultado...",
-                    color=discord.Color.green(),
+        async with _get_flow_lock(self.session.user_id):
+            if not self.session.modal_open:
+                await interaction.response.send_message(
+                    "Esta pregunta fue actualizada. Volv\u00e9 a presionar Regular/Mal.",
+                    ephemeral=True,
                 )
-                self.session.estado = ESTADO_FINALIZADA
-                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
-                await finalizar_entrevista(self.session)
-            else:
-                embed = mostrar_pregunta_actual(self.session)
-                view = QuestionView(self.session)
-                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=view)
-                self.session.answered_current = False
-        finally:
+                return
+            if self.session.estado != ESTADO_ACTIVA:
+                await interaction.response.send_message(
+                    _mensaje_no_activa(self.session),
+                    ephemeral=True,
+                )
+                _desbloquear_modal(self.session, "entrevista no activa al enviar")
+                return
+            if self.session.answered_current:
+                await interaction.response.send_message(
+                    "Esta pregunta ya fue procesada.",
+                    ephemeral=True,
+                )
+                _desbloquear_modal(self.session, "pregunta ya procesada")
+                return
+            self.session.answered_current = True
             self.session.processing = False
+            self.session.modal_open = False
+            self.session.modal_opened_at = None
+            self.session.modal_tipo = None
+            try:
+                self.session.answers.append(self.tipo)
+                texto = self.motivo_input.value.strip()
+                if texto:
+                    self.session.motives[self.session.current_index] = texto
+                self.session.current_index += 1
+                _persistir_sesion(self.session)
+
+                await interaction.response.defer()
+
+                if self.session.current_index >= len(self.session.questions):
+                    embed = discord.Embed(
+                        title="\U0001f4cb Entrevista finalizada",
+                        description="Procesando resultado...",
+                        color=discord.Color.green(),
+                    )
+                    self.session.estado = ESTADO_FINALIZADA
+                    await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
+                    await finalizar_entrevista(self.session)
+                else:
+                    embed = mostrar_pregunta_actual(self.session)
+                    view = QuestionView(self.session)
+                    await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=view)
+                    self.session.answered_current = False
+                    _persistir_sesion(self.session)
+            except discord.InteractionTimedOut:
+                logger.info(
+                    "[ENTREVISTA] Modal expirado al procesar, sesi\u00f3n desbloqueada: "
+                    "user=%s session=%s",
+                    self.session.user_id, self.session.session_id,
+                )
+            finally:
+                self.session.processing = False
+                self.session.modal_open = False
+                self.session.modal_opened_at = None
+                self.session.modal_tipo = None
+                if self.session.estado not in ESTADOS_TERMINALES:
+                    _persistir_sesion(self.session)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         self.session.processing = False
+        self.session.modal_open = False
+        self.session.modal_opened_at = None
+        self.session.modal_tipo = None
+        if self.session.estado not in ESTADOS_TERMINALES:
+            _persistir_sesion(self.session)
         logger.exception("Error en ReasonModal: %s", error)
 
 
@@ -795,6 +917,10 @@ class QuestionView(View):
         if active_interviews.get(self.session.user_id) is not self.session:
             return
         self.session.estado = ESTADO_EXPIRADA
+        self.session.processing = False
+        self.session.modal_open = False
+        self.session.modal_opened_at = None
+        self.session.modal_tipo = None
         active_interviews.pop(self.session.user_id, None)
         _persistir_sesion(self.session)
         logger.info(
@@ -818,12 +944,46 @@ class QuestionView(View):
             )
             return False
 
-        if self.session.processing:
+        return True
+
+    def _modal_puede_desbloquearse(self) -> bool:
+        """Indica si un modal en curso puede considerarse abandonado.
+
+        Un modal reci\u00e9n abierto (dentro de MODAL_RACE_WINDOW) podr\u00eda ser
+        un doble clic del bot\u00f3n; pasado ese lapso, cualquier nueva interacci\u00f3n
+        con la vista implica que el modal ya no est\u00e1 abierto y la entrevista
+        debe desbloquearse.
+        """
+        if self.session.modal_opened_at is None:
+            return True
+        opened = self.session.modal_opened_at
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - opened).total_seconds() > MODAL_RACE_WINDOW
+
+    async def _validar_antes_de_mutar(self, interaction: discord.Interaction) -> bool:
+        """Validaci\u00f3n que corre DENTRO del flow lock, justo antes de mutar.
+
+        Como ya se serializ\u00f3 con _get_flow_lock, es segura frente a carreras
+        (doble clic, Bien+Regular simult\u00e1neos). Devuelve False si hay que
+        abortar (ya respondi\u00f3 un mensaje).
+        """
+        if self.session.estado != ESTADO_ACTIVA:
             await interaction.response.send_message(
-                "Esta pregunta ya est\u00e1 siendo procesada.",
+                _mensaje_no_activa(self.session),
                 ephemeral=True,
             )
             return False
+
+        if self.session.processing:
+            if self._modal_puede_desbloquearse():
+                _desbloquear_modal(self.session, "nueva interacci\u00f3n con modal abandonado")
+            else:
+                await interaction.response.send_message(
+                    "Esta pregunta ya est\u00e1 siendo procesada.",
+                    ephemeral=True,
+                )
+                return False
 
         if self.session.answered_current:
             await interaction.response.send_message(
@@ -835,40 +995,34 @@ class QuestionView(View):
         return True
 
     async def _avanzar(self, interaction: discord.Interaction, respuesta: str):
-        if self.session.estado != ESTADO_ACTIVA:
-            await interaction.response.send_message(
-                _mensaje_no_activa(self.session),
-                ephemeral=True,
-            )
-            return
-        if self.session.answered_current:
-            await interaction.response.send_message(
-                "Esta pregunta ya fue procesada.",
-                ephemeral=True,
-            )
-            return
-        self.session.answered_current = True
-        self.session.processing = True
-        try:
-            self.session.answers.append(respuesta)
-            self.session.current_index += 1
-            _persistir_sesion(self.session)
+        async with _get_flow_lock(self.session.user_id):
+            if not await self._validar_antes_de_mutar(interaction):
+                return
+            self.session.answered_current = True
+            self.session.processing = True
+            try:
+                self.session.answers.append(respuesta)
+                self.session.current_index += 1
+                _persistir_sesion(self.session)
 
-            if self.session.current_index >= len(self.session.questions):
-                embed = discord.Embed(
-                    title="\U0001f4cb Entrevista finalizada",
-                    description="Procesando resultado...",
-                    color=discord.Color.green(),
-                )
-                self.session.estado = ESTADO_FINALIZADA
-                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
-                await finalizar_entrevista(self.session)
-            else:
-                embed = mostrar_pregunta_actual(self.session)
-                await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=self)
-                self.session.answered_current = False
-        finally:
-            self.session.processing = False
+                if self.session.current_index >= len(self.session.questions):
+                    embed = discord.Embed(
+                        title="\U0001f4cb Entrevista finalizada",
+                        description="Procesando resultado...",
+                        color=discord.Color.green(),
+                    )
+                    self.session.estado = ESTADO_FINALIZADA
+                    await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=None)
+                    await finalizar_entrevista(self.session)
+                else:
+                    embed = mostrar_pregunta_actual(self.session)
+                    await _editar_mensaje_entrevista(self.session, interaction, embed=embed, view=self)
+                    self.session.answered_current = False
+                    _persistir_sesion(self.session)
+            finally:
+                self.session.processing = False
+                if self.session.estado not in ESTADOS_TERMINALES:
+                    _persistir_sesion(self.session)
 
     @discord.ui.button(
         emoji=discord.PartialEmoji(name="bien", id=1414589831983661198),
@@ -884,20 +1038,15 @@ class QuestionView(View):
         label="Regular",
     )
     async def regular(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.session.estado != ESTADO_ACTIVA:
-            await interaction.response.send_message(
-                _mensaje_no_activa(self.session),
-                ephemeral=True,
-            )
-            return
-        if self.session.processing:
-            await interaction.response.send_message(
-                "Esta pregunta ya est\u00e1 siendo procesada.",
-                ephemeral=True,
-            )
-            return
-        self.session.processing = True
-        await interaction.response.send_modal(ReasonModal(self.session, "REGULAR"))
+        async with _get_flow_lock(self.session.user_id):
+            if not await self._validar_antes_de_mutar(interaction):
+                return
+            self.session.processing = True
+            self.session.modal_open = True
+            self.session.modal_opened_at = datetime.now(timezone.utc)
+            self.session.modal_tipo = "REGULAR"
+            _persistir_sesion(self.session)
+            await interaction.response.send_modal(ReasonModal(self.session, "REGULAR"))
 
     @discord.ui.button(
         emoji=discord.PartialEmoji(name="mal", id=1414589888661291081),
@@ -905,23 +1054,20 @@ class QuestionView(View):
         label="Mal",
     )
     async def mal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.session.estado != ESTADO_ACTIVA:
-            await interaction.response.send_message(
-                _mensaje_no_activa(self.session),
-                ephemeral=True,
-            )
-            return
-        if self.session.processing:
-            await interaction.response.send_message(
-                "Esta pregunta ya est\u00e1 siendo procesada.",
-                ephemeral=True,
-            )
-            return
-        self.session.processing = True
-        await interaction.response.send_modal(ReasonModal(self.session, "MAL"))
+        async with _get_flow_lock(self.session.user_id):
+            if not await self._validar_antes_de_mutar(interaction):
+                return
+            self.session.processing = True
+            self.session.modal_open = True
+            self.session.modal_opened_at = datetime.now(timezone.utc)
+            self.session.modal_tipo = "MAL"
+            _persistir_sesion(self.session)
+            await interaction.response.send_modal(ReasonModal(self.session, "MAL"))
 
 
 _recovery_locks: dict[int, asyncio.Lock] = {}
+_flow_locks: dict[int, asyncio.Lock] = {}
+_cleanup_task: asyncio.Task | None = None
 
 
 def _get_recovery_lock(user_id: int) -> asyncio.Lock:
@@ -929,6 +1075,19 @@ def _get_recovery_lock(user_id: int) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _recovery_locks[user_id] = lock
+    return lock
+
+
+def _get_flow_lock(user_id: int) -> asyncio.Lock:
+    """Lock que serializa las interacciones de botones/modales por entrevistado.
+
+    Evita carreras como Bien+Regular (o Bien+Mal) casi simultáneos: solo una
+    operación de avance/apertura de modal puede correr a la vez por usuario.
+    """
+    lock = _flow_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _flow_locks[user_id] = lock
     return lock
 
 
@@ -1007,6 +1166,9 @@ async def _recuperar_sesion(
         session.estado = ESTADO_ACTIVA
         session.processing = False
         session.answered_current = False
+        session.modal_open = False
+        session.modal_opened_at = None
+        session.modal_tipo = None
 
         if session.current_index >= len(session.questions):
             embed = discord.Embed(
@@ -2147,6 +2309,208 @@ async def entrevista_estado(
     )
 
 
+def _build_diagnostico_embed(
+    session: InterviewSession,
+    miembro_staff: discord.Member | None,
+    miembro_user: discord.Member | None,
+) -> discord.Embed:
+    estado = session.estado if session.estado in ESTADO_EMOJI else ESTADO_ABANDONADA
+    emoji = ESTADO_EMOJI[estado]
+    nombre_estado = ESTADO_NOMBRE[estado]
+
+    embed = discord.Embed(
+        title=f"{emoji} Diagn\u00f3stico de entrevista",
+        description=f"**Estado:** {emoji} {nombre_estado}",
+        color=(
+            discord.Color.green() if estado == ESTADO_ACTIVA
+            else discord.Color.orange() if estado == ESTADO_EXPIRADA
+            else discord.Color.red() if estado == ESTADO_FINALIZADA
+            else discord.Color.dark_gray()
+        ),
+        timestamp=discord.utils.utcnow(),
+    )
+
+    staff_str = miembro_staff.mention if miembro_staff else (
+        f"<@{session.staff_id}>" if session.staff_id else "Desconocido"
+    )
+    user_str = miembro_user.mention if miembro_user else (
+        f"<@{session.user_id}>" if session.user_id else "Desconocido"
+    )
+    embed.add_field(name="\U0001f465 Entrevistador", value=staff_str, inline=True)
+    embed.add_field(name="\U0001f464 Entrevistado", value=user_str, inline=True)
+    embed.add_field(
+        name="\U0001f194 Session ID",
+        value=f"`{session.session_id}`" if session.session_id else "Desconocido",
+        inline=False,
+    )
+
+    total = len(session.questions)
+    respondidas = len(session.answers)
+    restantes = max(0, total - session.current_index)
+
+    embed.add_field(
+        name="\U0001f4cb Progreso",
+        value=f"Pregunta {min(session.current_index + 1, total)} de {total}"
+        if 0 <= session.current_index < total
+        else f"{total} de {total} (finalizada)",
+        inline=True,
+    )
+    embed.add_field(
+        name="\u270f\ufe0f Respuestas",
+        value=f"{respondidas} realizadas \u2022 {restantes} restantes",
+        inline=True,
+    )
+    embed.add_field(
+        name="\u2139\ufe0f Intento",
+        value=f"{session.intento}/{entrevistas_db.MAX_INTENTOS}",
+        inline=True,
+    )
+
+    if 0 <= session.current_index < total:
+        pregunta = session.questions[session.current_index]
+        contenido = (pregunta.get("pregunta") or "").strip() or "(sin contenido)"
+        if len(contenido) > 1024:
+            contenido = contenido[:1021] + "..."
+        embed.add_field(
+            name="\u2753 Pregunta actual",
+            value=contenido,
+            inline=False,
+        )
+        esperada = (pregunta.get("respuesta_esperada") or "").strip()
+        if esperada:
+            if len(esperada) > 1024:
+                esperada = esperada[:1021] + "..."
+            embed.add_field(name="\u2705 Respuesta esperada", value=esperada, inline=False)
+
+    if session.answers:
+        linea = []
+        for i, (q, a) in enumerate(zip(session.questions, session.answers)):
+            emoji_resp = EMOJIS.get(a, "\u2753")
+            linea.append(f"{i + 1}. {emoji_resp} {q.get('categoria', '?')}")
+        texto_resp = "\n".join(linea)
+        if len(texto_resp) > 1024:
+            texto_resp = texto_resp[:1021] + "..."
+        embed.add_field(name="\U0001f4cb Respuestas dadas", value=texto_resp, inline=False)
+
+    if session.modal_open:
+        tipo_modal = session.modal_tipo or "?"
+        modal_desc = f"S\u00ed ({tipo_modal})"
+        opened = session.modal_opened_at
+        if opened is not None:
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            delta = (datetime.now(timezone.utc) - opened).total_seconds()
+            modal_desc += f" \u2014 hace {_humanizar_tiempo(max(0, delta))}"
+            if delta > MODAL_TIMEOUT:
+                modal_desc += " \u2022 (vencido, se desbloquear\u00e1 autom\u00e1ticamente)"
+        embed.add_field(name="\U0001f4c1 Modal abierto", value=modal_desc, inline=False)
+    else:
+        embed.add_field(name="\U0001f4c1 Modal abierto", value="No", inline=False)
+
+    embed.add_field(
+        name="\U0001f4c5 Inicio",
+        value=_timestamp_discord(session.started_at),
+        inline=True,
+    )
+    ultimo = session.last_updated or session.started_at
+    embed.add_field(
+        name="\u23f3 \u00daltimo movimiento",
+        value=_timestamp_discord(ultimo),
+        inline=True,
+    )
+
+    en_memoria = active_interviews.get(session.user_id) is session
+    embed.add_field(
+        name="\U0001f3ae En memoria",
+        value="S\u00ed (interfaz viva)" if en_memoria else "No (reconstruida desde la DB)",
+        inline=False,
+    )
+
+    embed.set_footer(text=f"Panel de seguimiento: /entrevista_estado \u2022 Diagn\u00f3stico puntual")
+    return embed
+
+
+@app_commands.command(
+    name="entrevista_diagnostico",
+    description="Muestra el estado completo de una entrevista activa o recuperable",
+)
+@app_commands.describe(
+    usuario="Usuario entrevistado (se detecta autom\u00e1ticamente si se usa en un ticket)",
+)
+async def entrevista_diagnostico(
+    interaction: discord.Interaction,
+    usuario: discord.Member | None = None,
+):
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "\u274c Este comando solo puede usarse en un servidor.",
+            ephemeral=True,
+        )
+        return
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "\u274c No se pudieron verificar tus permisos.",
+            ephemeral=True,
+        )
+        return
+
+    if not tiene_permiso_entrevista(interaction.user):
+        await interaction.response.send_message(
+            "\u274c No ten\u00e9s permisos para usar este comando.\n"
+            f"Necesit\u00e1s el permiso **Administrador** o el rol <@&{ROL_AUTORIZADO_ID}>.",
+            ephemeral=True,
+        )
+        return
+
+    target_id = usuario.id if usuario is not None else None
+    if target_id is None:
+        try:
+            session = _obtener_snapshot_sesion_canal(
+                interaction.channel_id, interaction.client,
+            )
+        except Exception:
+            logger.exception(
+                "[ENTREVISTA] Error al detectar sesi\u00f3n por canal: canal=%s",
+                interaction.channel_id,
+            )
+            session = None
+        if session is None:
+            await interaction.response.send_message(
+                "\u274c No se detect\u00f3 ninguna entrevista en este canal.\n"
+                "Indic\u00e1 el usuario con `usuario`.",
+                ephemeral=True,
+            )
+            return
+        target_id = session.user_id
+
+    sesion = _obtener_snapshot_sesion(target_id, interaction.client)
+    if sesion is None:
+        await interaction.response.send_message(
+            "\u274c No se encontr\u00f3 ninguna entrevista (activa o recuperable) para ese usuario.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.user.id == sesion.user_id:
+        await interaction.response.send_message(
+            "\u274c El entrevistado no puede usar este comando.",
+            ephemeral=True,
+        )
+        return
+
+    guild = interaction.guild
+    miembro_staff = guild.get_member(sesion.staff_id)
+    miembro_user = guild.get_member(sesion.user_id)
+    embed = _build_diagnostico_embed(sesion, miembro_staff, miembro_user)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    logger.info(
+        "[ENTREVISTA] Diagn\u00f3stico consultado: user=%s por=%s session=%s",
+        target_id, interaction.user.id, sesion.session_id,
+    )
+
+
 def _obtener_snapshot_sesion_canal(
     channel_id: int,
     client: discord.Client,
@@ -2331,9 +2695,24 @@ async def config_postulacion(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=ConfigPostulacionView(), ephemeral=True)
 
 
+def _iniciar_cleanup_task():
+    """Inicia el task de limpieza una sola vez (evita duplicados al recargar)."""
+    global _cleanup_task
+    if _cleanup_task is None or _cleanup_task.done():
+        _cleanup_task = asyncio.create_task(_limpiar_modales_abandonados())
+        logger.info("[ENTREVISTA] Task de limpieza de modales iniciado")
+
+
 async def setup(bot):
     entrevistas_db.init()
     _load_config()
+
+    try:
+        entrevistas_db.limpiar_sesiones_inconsistentes()
+    except Exception:
+        logger.warning("No se pudo limpiar sesiones inconsistentes al arranque")
+
+    _iniciar_cleanup_task()
 
     try:
         eliminadas = entrevistas_db.limpiar_sesiones_antiguas()
@@ -2359,5 +2738,18 @@ async def setup(bot):
     bot.tree.add_command(preguntas)
     bot.tree.add_command(recuperar_entrevista)
     bot.tree.add_command(entrevista_estado)
+    bot.tree.add_command(entrevista_diagnostico)
     bot.tree.add_command(config_postulacion)
-    logger.info("Comandos /config_preguntas, /config_postulacion, /preguntas, /recuperar_entrevista y /entrevista_estado registrados")
+    logger.info("Comandos /config_preguntas, /config_postulacion, /preguntas, /recuperar_entrevista, /entrevista_estado y /entrevista_diagnostico registrados")
+
+
+async def teardown(bot):
+    global _cleanup_task
+    if _cleanup_task is not None and not _cleanup_task.done():
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
+    _cleanup_task = None
+    logger.info("[ENTREVISTA] Task de limpieza de modales detenido")

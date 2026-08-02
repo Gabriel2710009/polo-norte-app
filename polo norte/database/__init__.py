@@ -18,6 +18,7 @@ _CONN_KWARGS = {
 }
 
 _pool = None
+_initialized = False
 
 
 def _get_pool():
@@ -68,6 +69,10 @@ def close_conn(conn):
 
 
 def init():
+    global _initialized
+    if _initialized:
+        logger.debug("DB ya inicializada, omitiendo")
+        return
     logger.info("Inicializando base de datos...")
     conn = _try_conn()
     cur = conn.cursor()
@@ -104,6 +109,8 @@ def init():
         config_db.init()
     except Exception as e:
         logger.error("Error inicializando tablas de config: %s", e)
+
+    _initialized = True
 
 
 def init_toggles():

@@ -40,6 +40,31 @@ class TestTreeOnError(unittest.TestCase):
         interaction.response.send_message.assert_awaited_once()
         logger.info.assert_called()
 
+    def test_command_not_found_sin_help_mensaje_neutro(self):
+        interaction = self._interaction()
+        interaction.client.tree = Mock()
+        interaction.client.tree.get_command = Mock(return_value=None)
+        error = CommandNotFound("hola", [])
+
+        _await(error_handler.tree_on_error(interaction, error))
+
+        interaction.response.send_message.assert_awaited_once()
+        texto = interaction.response.send_message.await_args.args[0]
+        self.assertIn("no existe", texto)
+        self.assertNotIn("/help", texto)
+
+    def test_command_not_found_con_help_referencia_help(self):
+        interaction = self._interaction()
+        interaction.client.tree = Mock()
+        interaction.client.tree.get_command = Mock(return_value=Mock())
+        error = CommandNotFound("hola", [])
+
+        _await(error_handler.tree_on_error(interaction, error))
+
+        interaction.response.send_message.assert_awaited_once()
+        texto = interaction.response.send_message.await_args.args[0]
+        self.assertIn("/help", texto)
+
     def test_command_not_found_no_duplica_respuesta(self):
         interaction = self._interaction()
         interaction.response.is_done = Mock(return_value=True)

@@ -46,7 +46,7 @@ DEFAULT_APROBAR_CONFIG = {
 
 def load_aprobar_config() -> dict:
     """Carga desde DB. Si está vacía, migra el default JSON y lo persiste."""
-    return config_db.cargar_aprobar(datos=DEFAULT_APROBAR_CONFIG)
+    return config_db.cargar_aprobar(datos_en_memoria=DEFAULT_APROBAR_CONFIG)
 
 
 def save_aprobar_config(config: dict):

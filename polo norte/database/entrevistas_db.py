@@ -127,6 +127,26 @@ def init():
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        cur.execute(f"""
+            ALTER TABLE {_TABLE_SESIONES}
+            ADD COLUMN IF NOT EXISTS processing BOOLEAN DEFAULT FALSE
+        """)
+        cur.execute(f"""
+            ALTER TABLE {_TABLE_SESIONES}
+            ADD COLUMN IF NOT EXISTS answered_current BOOLEAN DEFAULT FALSE
+        """)
+        cur.execute(f"""
+            ALTER TABLE {_TABLE_SESIONES}
+            ADD COLUMN IF NOT EXISTS modal_open BOOLEAN DEFAULT FALSE
+        """)
+        cur.execute(f"""
+            ALTER TABLE {_TABLE_SESIONES}
+            ADD COLUMN IF NOT EXISTS modal_opened_at TIMESTAMPTZ
+        """)
+        cur.execute(f"""
+            ALTER TABLE {_TABLE_SESIONES}
+            ADD COLUMN IF NOT EXISTS modal_tipo TEXT
+        """)
 
         conn.commit()
         logger.info("Tablas de entrevistas listas (PostgreSQL)")
@@ -510,15 +530,20 @@ def guardar_sesion_entrevista(datos: dict):
         cur.execute(
             f"INSERT INTO {_TABLE_SESIONES} "
             "(user_id, staff_id, channel_id, guild_id, session_id, questions, current_index, "
-            "answers, motives, intento, started_at, estado) "
-            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s) "
+            "answers, motives, intento, started_at, estado, processing, answered_current, "
+            "modal_open, modal_opened_at, modal_tipo) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, "
+            "%s, %s, %s, %s, %s) "
             f"ON CONFLICT (user_id) DO UPDATE SET "
             f"staff_id = EXCLUDED.staff_id, channel_id = EXCLUDED.channel_id, "
             f"guild_id = EXCLUDED.guild_id, session_id = EXCLUDED.session_id, "
             f"questions = EXCLUDED.questions, current_index = EXCLUDED.current_index, "
             f"answers = EXCLUDED.answers, motives = EXCLUDED.motives, "
             f"intento = EXCLUDED.intento, started_at = EXCLUDED.started_at, "
-            f"estado = EXCLUDED.estado, updated_at = NOW()",
+            f"estado = EXCLUDED.estado, "
+            f"processing = EXCLUDED.processing, answered_current = EXCLUDED.answered_current, "
+            f"modal_open = EXCLUDED.modal_open, modal_opened_at = EXCLUDED.modal_opened_at, "
+            f"modal_tipo = EXCLUDED.modal_tipo, updated_at = NOW()",
             (
                 datos["user_id"],
                 datos["staff_id"],
@@ -532,6 +557,11 @@ def guardar_sesion_entrevista(datos: dict):
                 datos.get("intento", 1),
                 datos.get("started_at"),
                 datos.get("estado", "ACTIVA"),
+                datos.get("processing", False),
+                datos.get("answered_current", False),
+                datos.get("modal_open", False),
+                datos.get("modal_opened_at"),
+                datos.get("modal_tipo"),
             ),
         )
         conn.commit()
@@ -582,6 +612,53 @@ def eliminar_sesion_entrevista(user_id: str) -> bool:
     except Exception as e:
         conn.rollback()
         logger.warning("Error eliminando sesi\u00f3n de entrevista para %s: %s", user_id, e)
+        raise
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def limpiar_sesiones_inconsistentes() -> int:
+    """Limpia filas que violan la integridad esperada.
+
+    1. Borra filas en estados terminales (FINALIZADA/ABANDONADA): no deber\u00edan
+       existir porque el flujo las elimina al terminar/descartar. Si quedaron es
+       por un corte entre setear el estado y el DELETE, y no deben recuperarse.
+    2. Repara filas ACTIVA con modal abierto hace más de MODAL_TIMEOUT (bot caído
+       / reinicio): limpia los flags de modal/processing/answered para que la
+       sesión siga siendo recuperable sin perder el progreso. Nunca deja un modal
+       pulsado en una sesión viva tras un reinicio.
+    """
+    conn = _get_conn()
+    cur = conn.cursor()
+    total = 0
+    try:
+        cur.execute(
+            f"DELETE FROM {_TABLE_SESIONES} WHERE estado IN ('FINALIZADA', 'ABANDONADA')",
+        )
+        total += cur.rowcount
+
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=300)
+        cur.execute(
+            f"UPDATE {_TABLE_SESIONES} "
+            "SET modal_open = FALSE, modal_opened_at = NULL, modal_tipo = NULL, "
+            "processing = FALSE, answered_current = FALSE, updated_at = NOW() "
+            "WHERE estado = 'ACTIVA' AND modal_open = TRUE "
+            "AND modal_opened_at IS NOT NULL AND modal_opened_at < %s",
+            (cutoff,),
+        )
+        total += cur.rowcount
+
+        conn.commit()
+        if total:
+            logger.info(
+                "Sesiones de entrevista inconsistentes limpiadas al arranque: %s",
+                total,
+            )
+        return total
+    except Exception as e:
+        conn.rollback()
+        logger.warning("Error limpiando sesiones inconsistentes: %s", e)
         raise
     finally:
         cur.close()

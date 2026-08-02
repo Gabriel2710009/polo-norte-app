@@ -118,10 +118,14 @@ async def tree_on_error(interaction: discord.Interaction, error: Exception):
     if isinstance(error, discord.app_commands.errors.CommandNotFound):
         logger.info("Comando slash inexistente intentado por %s: %s", interaction.user, error)
         if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "\u274c Ese comando no existe. Us\u00e1 `/help` para ver los comandos disponibles.",
-                ephemeral=True,
-            )
+            texto = "\u274c Ese comando no existe."
+            try:
+                tree = interaction.client.tree
+                if tree is not None and tree.get_command("help") is not None:
+                    texto += " Us\u00e1 `/help` para ver los comandos disponibles."
+            except Exception:
+                pass
+            await interaction.response.send_message(texto, ephemeral=True)
         return
 
     await reportar_error(error, contexto=f"Slash /{interaction.command.name if interaction.command else 'desconocido'}", interaction=interaction)

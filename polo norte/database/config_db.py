@@ -53,6 +53,9 @@ def _row_to_dict(cur) -> dict | None:
 
 def init():
     global _inicializado
+    if _inicializado:
+        logger.debug("config_db ya inicializado, omitiendo")
+        return
     conn = _get_conn()
     cur = conn.cursor()
     try:
