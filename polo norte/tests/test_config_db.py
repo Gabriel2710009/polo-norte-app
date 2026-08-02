@@ -54,7 +54,18 @@ def _patch_conn(rows=None, cursor=None):
     return patch.object(config_db, "_get_conn", return_value=conn), conn
 
 
-class TestConfigDbCargarAprobar(unittest.TestCase):
+class TestConfigDbBase(unittest.TestCase):
+    """Fuerza el flag de inicializaci\u00f3n para aislar cada funci\u00f3n
+    de la auto-creaci\u00f3n de tablas (que se prueba por separado)."""
+
+    def setUp(self):
+        config_db._inicializado = True
+
+    def tearDown(self):
+        config_db._inicializado = False
+
+
+class TestConfigDbCargarAprobar(TestConfigDbBase):
 
     def test_lee_desde_db(self):
         p, conn = _patch_conn(rows=[([1, 2, 3], [4, 5])])
@@ -83,7 +94,7 @@ class TestConfigDbCargarAprobar(unittest.TestCase):
         self.assertEqual(result, {"roles_asignar": [1, 2], "roles_eliminar": [3]})
 
 
-class TestConfigDbGuardarAprobar(unittest.TestCase):
+class TestConfigDbGuardarAprobar(TestConfigDbBase):
 
     def test_guarda_con_json(self):
         p, conn = _patch_conn()
@@ -96,7 +107,7 @@ class TestConfigDbGuardarAprobar(unittest.TestCase):
         self.assertEqual(params[1], json.dumps([2]))
 
 
-class TestConfigDbNotificados(unittest.TestCase):
+class TestConfigDbNotificados(TestConfigDbBase):
 
     def test_cargar_devuelve_int(self):
         p, _ = _patch_conn(rows=[("5001",), ("5002",)])
@@ -130,7 +141,7 @@ class TestConfigDbNotificados(unittest.TestCase):
         self.assertEqual(params, (5001,))
 
 
-class TestConfigDbGlobal(unittest.TestCase):
+class TestConfigDbGlobal(TestConfigDbBase):
 
     def test_cargar_global_clave(self):
         p, _ = _patch_conn(rows=[("12345",)])
@@ -153,7 +164,7 @@ class TestConfigDbGlobal(unittest.TestCase):
         self.assertIn("ON CONFLICT", sql)
 
 
-class TestConfigDbBienvenida(unittest.TestCase):
+class TestConfigDbBienvenida(TestConfigDbBase):
 
     def test_cargar_bienvenida_desde_db(self):
         p, _ = _patch_conn(rows=[("Hola",)])
@@ -167,6 +178,48 @@ class TestConfigDbBienvenida(unittest.TestCase):
             result = config_db.cargar_bienvenida(datos={"mensaje": "Default"})
         self.assertEqual(result, {"mensaje": "Default"})
         self.assertTrue(any("UPDATE config_bienvenida" in sql for sql, _ in conn.cursor_obj.executed))
+
+
+class TestConfigDbAutoInit(unittest.TestCase):
+    """Verifica que config_db crea las tablas autom\u00e1ticamente
+    ante la primera lectura/escritura (base vac\u00eda)."""
+
+    def test_asegurar_inicializacion_ejecuta_init_una_vez(self):
+        config_db._inicializado = False
+        init_calls = []
+        orig = config_db.init
+
+        def fake_init():
+            init_calls.append(1)
+            orig()
+
+        try:
+            with patch.object(config_db, "init", side_effect=fake_init), \
+                 patch.object(config_db, "_migrar_desde_json_si_vacio"), \
+                 patch.object(config_db, "_migrar_notificados_json_si_vacio"):
+                p, conn = _patch_conn(rows=[])
+                with p:
+                    config_db._asegurar_inicializacion()
+                    config_db._asegurar_inicializacion()
+            self.assertEqual(len(init_calls), 1)
+        finally:
+            config_db._inicializado = False
+
+    def test_primera_lectura_crea_tablas(self):
+        config_db._inicializado = False
+        try:
+            with patch.object(config_db, "_migrar_desde_json_si_vacio"), \
+                 patch.object(config_db, "_migrar_notificados_json_si_vacio"):
+                p, conn = _patch_conn(rows=[])
+                with p:
+                    result = config_db.cargar_global_clave("owner_id")
+                sqls = [sql for sql, _ in conn.cursor_obj.executed]
+                self.assertTrue(any("CREATE TABLE IF NOT EXISTS config_global" in s for s in sqls))
+                self.assertTrue(any("CREATE TABLE IF NOT EXISTS config_aprobar" in s for s in sqls))
+                self.assertTrue(any("CREATE TABLE IF NOT EXISTS config_bienvenida" in s for s in sqls))
+                self.assertTrue(any("CREATE TABLE IF NOT EXISTS tickets_notificados" in s for s in sqls))
+        finally:
+            config_db._inicializado = False
 
 
 if __name__ == "__main__":

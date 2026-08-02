@@ -99,6 +99,10 @@ class ErrorCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: Exception):
+        # Comando prefijo inexistente (/foo como texto): caso esperado, sin ERROR.
+        if isinstance(error, commands.CommandNotFound):
+            logger.info("Comando inexistente por texto: %s", ctx.message.content)
+            return
         await reportar_error(error, contexto=f"Comando {ctx.command}", bot=ctx.bot)
 
     @commands.Cog.listener()
@@ -107,6 +111,24 @@ class ErrorCog(commands.Cog):
 
 
 _setup_ejecutado = False
+
+
+async def tree_on_error(interaction: discord.Interaction, error: Exception):
+    # Comando inexistente: caso esperado, sin traceback ni ERROR.
+    if isinstance(error, discord.app_commands.errors.CommandNotFound):
+        logger.info("Comando slash inexistente intentado por %s: %s", interaction.user, error)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "\u274c Ese comando no existe. Us\u00e1 `/help` para ver los comandos disponibles.",
+                ephemeral=True,
+            )
+        return
+
+    await reportar_error(error, contexto=f"Slash /{interaction.command.name if interaction.command else 'desconocido'}", interaction=interaction)
+    if interaction.response.is_done():
+        await interaction.followup.send("❌ Ocurrió un error interno.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Ocurrió un error interno.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
@@ -128,12 +150,5 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(ErrorCog(bot))
 
     # Tree error handler para app_commands (slash commands)
-    async def tree_on_error(interaction: discord.Interaction, error: Exception):
-        await reportar_error(error, contexto=f"Slash /{interaction.command.name if interaction.command else 'desconocido'}", interaction=interaction)
-        if interaction.response.is_done():
-            await interaction.followup.send("❌ Ocurrió un error interno.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Ocurrió un error interno.", ephemeral=True)
-
     bot.tree.on_error = tree_on_error
     logger.info("ErrorHandler iniciado. OWNER_ID=%s", owner_id)

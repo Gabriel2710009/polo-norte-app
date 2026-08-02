@@ -68,6 +68,16 @@ async def on_ready():
         logger.error("Faltan variables de entorno.")
         return
 
+    try:
+        db.init()
+        logger.info("DB inicializada correctamente")
+        log_actions.log_info("\u2705 DB inicializada", "Conexi\u00f3n a PostgreSQL establecida y tablas listas.")
+    except Exception as e:
+        logger.error("Error inicializando DB: %s", e)
+        status_reporter.report_error(e, contexto="Inicialización DB", es_critico=True)
+        await log_actions.log_error("\u274c Error DB", f"No se pudo inicializar la base de datos:\n`{e}`")
+        return
+
     await error_handler.setup(bot)
     log_actions.setup(bot, LOG_CHANNEL_ID)
     await aprobar.setup(bot)
@@ -89,16 +99,6 @@ async def on_ready():
     await blacklist_cog.setup(bot)
     await help_cog.setup(bot)
     await entrevistas_cog.setup(bot)
-
-    try:
-        db.init()
-        logger.info("DB inicializada correctamente")
-        log_actions.log_info("\u2705 DB inicializada", "Conexi\u00f3n a PostgreSQL establecida y tablas listas.")
-    except Exception as e:
-        logger.error("Error inicializando DB: %s", e)
-        status_reporter.report_error(e, contexto="Inicialización DB", es_critico=True)
-        await log_actions.log_error("\u274c Error DB", f"No se pudo inicializar la base de datos:\n`{e}`")
-        return
 
     try:
         ITEMS_ACTIVO = db.get_toggle("items")

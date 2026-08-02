@@ -27,6 +27,22 @@ def _close_conn(conn):
     database.close_conn(conn)
 
 
+_inicializado = False
+
+
+def _asegurar_inicializacion():
+    """Crea las tablas si a\u00fan no se llam\u00f3 a init().
+
+    Elimina la dependencia de orden: cualquier lectura/escritura de estas
+    tablas garantiza que existan, incluso con una base completamente vac\u00eda.
+    """
+    global _inicializado
+    if _inicializado:
+        return
+    init()
+    _inicializado = True
+
+
 def _row_to_dict(cur) -> dict | None:
     row = cur.fetchone()
     if row:
@@ -36,6 +52,7 @@ def _row_to_dict(cur) -> dict | None:
 
 
 def init():
+    global _inicializado
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -91,6 +108,7 @@ def init():
 
     _migrar_desde_json_si_vacio()
     _migrar_notificados_json_si_vacio()
+    _inicializado = True
 
 
 # --- config_aprobar ---
@@ -160,6 +178,7 @@ def cargar_aprobar(datos_en_memoria: dict | None = None) -> dict:
 
     Si ya hay datos en memoria (cache), los devuelve directamente.
     Si la DB est� vac�a, migra desde el JSON de respaldo y persiste."""
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -180,6 +199,7 @@ def cargar_aprobar(datos_en_memoria: dict | None = None) -> dict:
 
 
 def guardar_aprobar(config: dict, actualizado_por: str = "", via: str = ""):
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -212,6 +232,7 @@ def guardar_aprobar(config: dict, actualizado_por: str = "", via: str = ""):
 # --- config_bienvenida ---
 
 def cargar_bienvenida(datos: dict | None = None) -> dict:
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -229,6 +250,7 @@ def cargar_bienvenida(datos: dict | None = None) -> dict:
 
 
 def guardar_bienvenida(config: dict, actualizado_por: str = "", via: str = ""):
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -251,6 +273,7 @@ def guardar_bienvenida(config: dict, actualizado_por: str = "", via: str = ""):
 # --- config_global (owner_id) ---
 
 def cargar_global_clave(clave: str) -> str | None:
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -263,6 +286,7 @@ def cargar_global_clave(clave: str) -> str | None:
 
 
 def guardar_global_clave(clave: str, valor: str):
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -323,6 +347,7 @@ def _migrar_notificados_json_si_vacio():
 
 
 def cargar_notificados() -> set[int]:
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -335,6 +360,7 @@ def cargar_notificados() -> set[int]:
 
 
 def guardar_notificados(data: set[int]):
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -353,6 +379,7 @@ def guardar_notificados(data: set[int]):
 
 
 def agregar_notificado(channel_id: int):
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
@@ -370,6 +397,7 @@ def agregar_notificado(channel_id: int):
 
 
 def eliminar_notificado(channel_id: int):
+    _asegurar_inicializacion()
     conn = _get_conn()
     cur = conn.cursor()
     try:
