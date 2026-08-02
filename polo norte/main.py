@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
+# TODO: en algun momento revisar si esto sigue siendo necesario
 import database as db
 from utils.validator import validate
 from utils.parser import parse_embed
