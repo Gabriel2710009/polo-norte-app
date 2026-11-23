@@ -99,3 +99,50 @@ def load_bienvenida_config() -> dict:
 
 def save_bienvenida_config(config: dict, actualizado_por: str = ""):
     return config_db.guardar_bienvenida(config, actualizado_por=actualizado_por)
+
+
+# ── Configuración de /despedir y /expulsar ────────────────────────────────
+
+DEFAULT_DESPEDIR_CONFIG = {
+    "rol_verificado": 1306131425304514611,
+    "rol_despedido": 1307889268227837962,
+    "categorias_busqueda": [
+        1307135109132189766,
+        1338628970467426344,
+        1338630902099607594,
+    ],
+    "categoria_destino": 1345688584249933926,
+    "canal_despedido": 1343860496993878057,
+    "plantilla_aviso": "{usuario} Despedido por {motivo}",
+    "rol_autorizado": 1307612928211554386,
+    "limite_primeros_mensajes": 10,
+    "usar_audit_log": True,
+    "timeout_confirmacion": 120,
+    # 0 = usar LOG_CHANNEL_ID del .env como fallback
+    "canal_logs": 0,
+    "plantilla_despedir": (
+        "{usuario} Quedas despedido por {motivo}. "
+        "Pasa clip de como te quitas el job con el comando /multijob "
+        "y dándole a \"abandonar\" con el job de la armería. "
+        "Si en {dias} días no pasas dicho clip se solicitará "
+        "que te metan ban para que te lo quemes."
+    ),
+    "dias": 3,
+}
+
+
+def load_despedir_config() -> dict:
+    """Carga la config de /despedir y /expulsar.
+
+    Las claves que no estén guardadas se completan con los defaults, para que
+    agregar variables nuevas no rompa configuraciones ya persistidas.
+    """
+    config = dict(DEFAULT_DESPEDIR_CONFIG)
+    guardada = config_db.cargar_despedir(datos=config)
+    if guardada:
+        config.update(guardada)
+    return config
+
+
+def save_despedir_config(config: dict, actualizado_por: str = ""):
+    return config_db.guardar_despedir(config, actualizado_por=actualizado_por)

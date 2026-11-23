@@ -137,6 +137,45 @@ SECCIONES = [
         ),
     },
     {
+        "titulo": "\U0001f4e4 /expulsar",
+        "descripcion": (
+            "Expulsa a un usuario: busca su canal en las categor\u00edas "
+            "configuradas, **siempre te pregunta** cu\u00e1l es el correcto, "
+            "lo mueve a *Trabajadores fuera*, le quita todos los roles y deja "
+            "**despedido** y **verificado**, y publica el aviso en el canal "
+            "**despedido**.\n\n"
+            "Acepta menci\u00f3n (@Usuario) o selecci\u00f3n de usuario y un motivo opcional.\n\n"
+            "**Requiere:** Administrador, Gestionar Roles o rol autorizado."
+        ),
+    },
+    {
+        "titulo": "\U0001f4e4 /despedir",
+        "descripcion": (
+            "Env\u00eda el texto de despido (configurable) **en el canal donde "
+            "se ejecuta**, mencionando al usuario e indicando el motivo y el "
+            "plazo para pasar el clip de `/multijob`.\n\n"
+            "**Requiere:** Administrador, Gestionar Roles o rol autorizado."
+        ),
+    },
+    {
+        "titulo": "\u2699\ufe0f /config_expulsar",
+        "descripcion": (
+            "Panel para configurar `/expulsar`: roles despedido/verificado y "
+            "autorizado, categor\u00edas de b\u00fasqueda, categor\u00eda destino, "
+            "canal despedido, canal de logs, plantilla del aviso, l\u00edmite de "
+            "primeros mensajes, uso del audit log y timeout de confirmaci\u00f3n.\n\n"
+            "Todo se guarda de forma persistente y se aplica sin reiniciar."
+        ),
+    },
+    {
+        "titulo": "\u2699\ufe0f /config_despedir",
+        "descripcion": (
+            "Panel para configurar `/despedir`: plantilla del mensaje, d\u00edas "
+            "del plazo y canal de auditor\u00eda.\n\n"
+            "Admite los placeholders `{usuario}`, `{motivo}`, `{dias}` y `{canal}`."
+        ),
+    },
+    {
         "titulo": "\U0001f4da /help",
         "descripcion": (
             "Muestra esta gu\u00eda con todos los comandos disponibles.\n\n"

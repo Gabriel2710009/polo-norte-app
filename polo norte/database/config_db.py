@@ -17,6 +17,7 @@ _TABLE_APROBAR = "config_aprobar"
 _TABLE_BIENVENIDA = "config_bienvenida"
 _TABLE_GLOBAL = "config_global"
 _TABLE_NOTIFICADOS = "tickets_notificados"
+_TABLE_DESPEDIR = "config_despedir"
 
 
 def _get_conn():
@@ -83,6 +84,19 @@ def init():
         """)
         cur.execute(f"""
             INSERT INTO {_TABLE_BIENVENIDA} (id) VALUES (1)
+            ON CONFLICT (id) DO NOTHING
+        """)
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE_DESPEDIR} (
+                id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                config JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_by TEXT
+            )
+        """)
+        cur.execute(f"""
+            INSERT INTO {_TABLE_DESPEDIR} (id) VALUES (1)
             ON CONFLICT (id) DO NOTHING
         """)
 
@@ -409,6 +423,58 @@ def eliminar_notificado(channel_id: int):
     except Exception as e:
         conn.rollback()
         logger.error("Error eliminando notificado %s: %s", channel_id, e)
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+# --- config_despedir (/despedir y /expulsar) ---
+
+def cargar_despedir(datos: dict | None = None) -> dict:
+    """Carga la configuración como un blob JSONB.
+
+    Si la tabla está vacía y se reciben defaults, los persiste una sola vez.
+    """
+    _asegurar_inicializacion()
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT config FROM {_TABLE_DESPEDIR} WHERE id = 1")
+        row = cur.fetchone()
+        if row and row[0]:
+            valor = row[0]
+            if isinstance(valor, str):
+                valor = json.loads(valor)
+            return valor
+        if datos is not None:
+            guardar_despedir(datos, via="migracion_init")
+            return datos
+        return {}
+    finally:
+        cur.close()
+        _close_conn(conn)
+
+
+def guardar_despedir(config: dict, actualizado_por: str = "", via: str = ""):
+    _asegurar_inicializacion()
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"UPDATE {_TABLE_DESPEDIR} SET "
+            "config = %s::jsonb, updated_at = NOW(), updated_by = %s WHERE id = 1",
+            (json.dumps(config, ensure_ascii=False), actualizado_por or via),
+        )
+        conn.commit()
+        logger.info(
+            "Config despedir guardada (via=%s): %s claves",
+            via or actualizado_por, len(config),
+        )
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error("Error guardando config despedir: %s", e)
+        raise
     finally:
         cur.close()
         _close_conn(conn)

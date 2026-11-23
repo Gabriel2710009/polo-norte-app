@@ -20,6 +20,8 @@ from cogs import bienvenida_cog
 from cogs import blacklist_cog
 from cogs import help_cog
 from cogs import entrevistas_cog
+from cogs import config_despedir_cog
+from cogs import despedir_cog
 from utils import error_handler
 
 load_dotenv()
@@ -99,6 +101,8 @@ async def on_ready():
     await blacklist_cog.setup(bot)
     await help_cog.setup(bot)
     await entrevistas_cog.setup(bot)
+    await config_despedir_cog.setup(bot)
+    await despedir_cog.setup(bot)
 
     try:
         ITEMS_ACTIVO = db.get_toggle("items")
